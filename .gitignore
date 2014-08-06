@@ -1,0 +1,10 @@
+bin/*
+debian/golang-go*.lintian-overrides
+pkg/*
+src/cmd/*/zdefaultcc.go
+src/cmd/gc/opnames.h
+src/liblink/anames?.c
+src/pkg/runtime/z*.c
+src/pkg/runtime/z*.h
+src/pkg/runtime/z*.s
+src/pkg/runtime/z*.go

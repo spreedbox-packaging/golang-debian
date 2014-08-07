@@ -22,8 +22,13 @@ build-arch build-indep build clean install binary-arch binary-indep binary: debi
 
 override_dh_auto_clean:
 	rm -rf bin pkg
+	rm -f src/cmd/*/zdefaultcc.go src/cmd/gc/opnames.h src/liblink/anames?.c \
+          src/pkg/runtime/z*.s src/pkg/runtime/z*.h \
+		  src/pkg/runtime/z*.c src/pkg/runtime/z*.go
 	# golang-go-$os-$arch.install files are auto-generated in override_dh_install
 	rm -f debian/golang-go-*.install
+	# Ditto for golang-go-$os-$arch.lintian-overrides
+	rm -f debian/golang-go-*.lintian-overrides
 	rm -f debian/*+
 	rm -f debian/build.stamp
 	rm -f test/pass.out test/run.out test/times.out

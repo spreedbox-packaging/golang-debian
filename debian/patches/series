@@ -2,3 +2,4 @@
 0002-archive-tar-reuse-temporary-buffer-in-writeHeader.patch
 0003-archive-tar-reuse-temporary-buffer-in-readHeader.patch
 0004-archive-tar-fix-writing-of-pax-headers.patch
+0005-fix_qemu_arm_nsig.patch

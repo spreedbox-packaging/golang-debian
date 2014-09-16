@@ -1,6 +1,7 @@
 golang (2:1.3.1-1+struktur0) precise; urgency=medium
 
   * Initial backport from debian/unstable.
+  * Fix build failure under user mode arm emulation.
 
  -- Lance Cooper <lance@struktur.de>  Tue, 16 Sep 2014 11:47:08 +0200
 

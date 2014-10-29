@@ -20,8 +20,10 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +37,8 @@ const (
 type wantRange struct {
 	start, end int64 // range [start,end)
 }
+
+var itoa = strconv.Itoa
 
 var ServeFileRangeTests = []struct {
 	r      string
@@ -50,11 +54,15 @@ var ServeFileRangeTests = []struct {
 	{r: "bytes=0-0,-2", code: StatusPartialContent, ranges: []wantRange{{0, 1}, {testFileLen - 2, testFileLen}}},
 	{r: "bytes=0-1,5-8", code: StatusPartialContent, ranges: []wantRange{{0, 2}, {5, 9}}},
 	{r: "bytes=0-1,5-", code: StatusPartialContent, ranges: []wantRange{{0, 2}, {5, testFileLen}}},
+	{r: "bytes=5-1000", code: StatusPartialContent, ranges: []wantRange{{5, testFileLen}}},
 	{r: "bytes=0-,1-,2-,3-,4-", code: StatusOK}, // ignore wasteful range request
+	{r: "bytes=0-" + itoa(testFileLen-2), code: StatusPartialContent, ranges: []wantRange{{0, testFileLen - 1}}},
+	{r: "bytes=0-" + itoa(testFileLen-1), code: StatusPartialContent, ranges: []wantRange{{0, testFileLen}}},
+	{r: "bytes=0-" + itoa(testFileLen), code: StatusPartialContent, ranges: []wantRange{{0, testFileLen}}},
 }
 
 func TestServeFile(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		ServeFile(w, r, "testdata/file")
 	}))
@@ -170,7 +178,7 @@ var fsRedirectTestData = []struct {
 }
 
 func TestFSRedirect(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(StripPrefix("/test", FileServer(Dir("."))))
 	defer ts.Close()
 
@@ -195,7 +203,7 @@ func (fs *testFileSystem) Open(name string) (File, error) {
 }
 
 func TestFileServerCleans(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ch := make(chan string, 1)
 	fs := FileServer(&testFileSystem{func(name string) (File, error) {
 		ch <- name
@@ -219,6 +227,54 @@ func TestFileServerCleans(t *testing.T) {
 	}
 }
 
+func TestFileServerEscapesNames(t *testing.T) {
+	defer afterTest(t)
+	const dirListPrefix = "<pre>\n"
+	const dirListSuffix = "\n</pre>\n"
+	tests := []struct {
+		name, escaped string
+	}{
+		{`simple_name`, `<a href="simple_name">simple_name</a>`},
+		{`"'<>&`, `<a href="%22%27%3C%3E&">&#34;&#39;&lt;&gt;&amp;</a>`},
+		{`?foo=bar#baz`, `<a href="%3Ffoo=bar%23baz">?foo=bar#baz</a>`},
+		{`<combo>?foo`, `<a href="%3Ccombo%3E%3Ffoo">&lt;combo&gt;?foo</a>`},
+	}
+
+	// We put each test file in its own directory in the fakeFS so we can look at it in isolation.
+	fs := make(fakeFS)
+	for i, test := range tests {
+		testFile := &fakeFileInfo{basename: test.name}
+		fs[fmt.Sprintf("/%d", i)] = &fakeFileInfo{
+			dir:     true,
+			modtime: time.Unix(1000000000, 0).UTC(),
+			ents:    []*fakeFileInfo{testFile},
+		}
+		fs[fmt.Sprintf("/%d/%s", i, test.name)] = testFile
+	}
+
+	ts := httptest.NewServer(FileServer(&fs))
+	defer ts.Close()
+	for i, test := range tests {
+		url := fmt.Sprintf("%s/%d", ts.URL, i)
+		res, err := Get(url)
+		if err != nil {
+			t.Fatalf("test %q: Get: %v", test.name, err)
+		}
+		b, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			t.Fatalf("test %q: read Body: %v", test.name, err)
+		}
+		s := string(b)
+		if !strings.HasPrefix(s, dirListPrefix) || !strings.HasSuffix(s, dirListSuffix) {
+			t.Errorf("test %q: listing dir, full output is %q, want prefix %q and suffix %q", test.name, s, dirListPrefix, dirListSuffix)
+		}
+		if trimmed := strings.TrimSuffix(strings.TrimPrefix(s, dirListPrefix), dirListSuffix); trimmed != test.escaped {
+			t.Errorf("test %q: listing dir, filename escaped to %q, want %q", test.name, trimmed, test.escaped)
+		}
+		res.Body.Close()
+	}
+}
+
 func mustRemoveAll(dir string) {
 	err := os.RemoveAll(dir)
 	if err != nil {
@@ -227,7 +283,7 @@ func mustRemoveAll(dir string) {
 }
 
 func TestFileServerImplicitLeadingSlash(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	tempDir, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatalf("TempDir: %v", err)
@@ -259,6 +315,9 @@ func TestFileServerImplicitLeadingSlash(t *testing.T) {
 }
 
 func TestDirJoin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping test on windows")
+	}
 	wfi, err := os.Stat("/etc/hosts")
 	if err != nil {
 		t.Skip("skipping test; no /etc/hosts file")
@@ -306,31 +365,36 @@ func TestEmptyDirOpenCWD(t *testing.T) {
 }
 
 func TestServeFileContentType(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	const ctype = "icecream/chocolate"
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
-		if r.FormValue("override") == "1" {
+		switch r.FormValue("override") {
+		case "1":
 			w.Header().Set("Content-Type", ctype)
+		case "2":
+			// Explicitly inhibit sniffing.
+			w.Header()["Content-Type"] = []string{}
 		}
 		ServeFile(w, r, "testdata/file")
 	}))
 	defer ts.Close()
-	get := func(override, want string) {
+	get := func(override string, want []string) {
 		resp, err := Get(ts.URL + "?override=" + override)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if h := resp.Header.Get("Content-Type"); h != want {
-			t.Errorf("Content-Type mismatch: got %q, want %q", h, want)
+		if h := resp.Header["Content-Type"]; !reflect.DeepEqual(h, want) {
+			t.Errorf("Content-Type mismatch: got %v, want %v", h, want)
 		}
 		resp.Body.Close()
 	}
-	get("0", "text/plain; charset=utf-8")
-	get("1", ctype)
+	get("0", []string{"text/plain; charset=utf-8"})
+	get("1", []string{ctype})
+	get("2", nil)
 }
 
 func TestServeFileMimeType(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		ServeFile(w, r, "testdata/style.css")
 	}))
@@ -347,7 +411,7 @@ func TestServeFileMimeType(t *testing.T) {
 }
 
 func TestServeFileFromCWD(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		ServeFile(w, r, "fs_test.go")
 	}))
@@ -363,7 +427,7 @@ func TestServeFileFromCWD(t *testing.T) {
 }
 
 func TestServeFileWithContentEncoding(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		w.Header().Set("Content-Encoding", "foo")
 		ServeFile(w, r, "testdata/file")
@@ -380,7 +444,7 @@ func TestServeFileWithContentEncoding(t *testing.T) {
 }
 
 func TestServeIndexHtml(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	const want = "index.html says hello\n"
 	ts := httptest.NewServer(FileServer(Dir(".")))
 	defer ts.Close()
@@ -402,7 +466,7 @@ func TestServeIndexHtml(t *testing.T) {
 }
 
 func TestFileServerZeroByte(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(FileServer(Dir(".")))
 	defer ts.Close()
 
@@ -441,8 +505,9 @@ func (f *fakeFileInfo) Mode() os.FileMode {
 
 type fakeFile struct {
 	io.ReadSeeker
-	fi   *fakeFileInfo
-	path string // as opened
+	fi     *fakeFileInfo
+	path   string // as opened
+	entpos int
 }
 
 func (f *fakeFile) Close() error               { return nil }
@@ -452,10 +517,20 @@ func (f *fakeFile) Readdir(count int) ([]os.FileInfo, error) {
 		return nil, os.ErrInvalid
 	}
 	var fis []os.FileInfo
-	for _, fi := range f.fi.ents {
-		fis = append(fis, fi)
+
+	limit := f.entpos + count
+	if count <= 0 || limit > len(f.fi.ents) {
+		limit = len(f.fi.ents)
 	}
-	return fis, nil
+	for ; f.entpos < limit; f.entpos++ {
+		fis = append(fis, f.fi.ents[f.entpos])
+	}
+
+	if len(fis) == 0 && count > 0 {
+		return fis, io.EOF
+	} else {
+		return fis, nil
+	}
 }
 
 type fakeFS map[string]*fakeFileInfo
@@ -464,14 +539,13 @@ func (fs fakeFS) Open(name string) (File, error) {
 	name = path.Clean(name)
 	f, ok := fs[name]
 	if !ok {
-		println("fake filesystem didn't find file", name)
 		return nil, os.ErrNotExist
 	}
 	return &fakeFile{ReadSeeker: strings.NewReader(f.contents), fi: f, path: name}, nil
 }
 
 func TestDirectoryIfNotModified(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	const indexContents = "I am a fake index.html file"
 	fileMod := time.Unix(1000000000, 0).UTC()
 	fileModStr := fileMod.Format(TimeFormat)
@@ -545,7 +619,7 @@ func mustStat(t *testing.T, fileName string) os.FileInfo {
 }
 
 func TestServeContent(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	type serveParam struct {
 		name        string
 		modtime     time.Time
@@ -567,7 +641,10 @@ func TestServeContent(t *testing.T) {
 	defer ts.Close()
 
 	type testCase struct {
-		file             string
+		// One of file or content must be set:
+		file    string
+		content io.ReadSeeker
+
 		modtime          time.Time
 		serveETag        string // optional
 		serveContentType string // optional
@@ -615,6 +692,14 @@ func TestServeContent(t *testing.T) {
 			},
 			wantStatus: 304,
 		},
+		"not_modified_etag_no_seek": {
+			content:   panicOnSeek{nil}, // should never be called
+			serveETag: `"foo"`,
+			reqHeader: map[string]string{
+				"If-None-Match": `"foo"`,
+			},
+			wantStatus: 304,
+		},
 		"range_good": {
 			file:      "testdata/style.css",
 			serveETag: `"A"`,
@@ -638,15 +723,21 @@ func TestServeContent(t *testing.T) {
 		},
 	}
 	for testName, tt := range tests {
-		f, err := os.Open(tt.file)
-		if err != nil {
-			t.Fatalf("test %q: %v", testName, err)
+		var content io.ReadSeeker
+		if tt.file != "" {
+			f, err := os.Open(tt.file)
+			if err != nil {
+				t.Fatalf("test %q: %v", testName, err)
+			}
+			defer f.Close()
+			content = f
+		} else {
+			content = tt.content
 		}
-		defer f.Close()
 
 		servec <- serveParam{
 			name:        filepath.Base(tt.file),
-			content:     f,
+			content:     content,
 			modtime:     tt.modtime,
 			etag:        tt.serveETag,
 			contentType: tt.serveContentType,
@@ -678,7 +769,7 @@ func TestServeContent(t *testing.T) {
 
 // verifies that sendfile is being used on Linux
 func TestLinuxSendfile(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	if runtime.GOOS != "linux" {
 		t.Skip("skipping; linux-only test")
 	}
@@ -697,7 +788,7 @@ func TestLinuxSendfile(t *testing.T) {
 	defer ln.Close()
 
 	var buf bytes.Buffer
-	child := exec.Command("strace", "-f", os.Args[0], "-test.run=TestLinuxSendfileChild")
+	child := exec.Command("strace", "-f", "-q", "-e", "trace=sendfile,sendfile64", os.Args[0], "-test.run=TestLinuxSendfileChild")
 	child.ExtraFiles = append(child.ExtraFiles, lnf)
 	child.Env = append([]string{"GO_WANT_HELPER_PROCESS=1"}, os.Environ()...)
 	child.Stdout = &buf
@@ -763,3 +854,5 @@ func TestLinuxSendfileChild(*testing.T) {
 		panic(err)
 	}
 }
+
+type panicOnSeek struct{ io.ReadSeeker }

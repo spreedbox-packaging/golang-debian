@@ -6,8 +6,10 @@
 package base64
 
 import (
+	"bytes"
 	"io"
 	"strconv"
+	"strings"
 )
 
 /*
@@ -48,6 +50,13 @@ var StdEncoding = NewEncoding(encodeStd)
 // URLEncoding is the alternate base64 encoding defined in RFC 4648.
 // It is typically used in URLs and file names.
 var URLEncoding = NewEncoding(encodeURL)
+
+var removeNewlinesMapper = func(r rune) rune {
+	if r == '\r' || r == '\n' {
+		return -1
+	}
+	return r
+}
 
 /*
  * Encoder
@@ -150,13 +159,11 @@ func (e *encoder) Write(p []byte) (n int, err error) {
 		nn := len(e.out) / 4 * 3
 		if nn > len(p) {
 			nn = len(p)
+			nn -= nn % 3
 		}
-		nn -= nn % 3
-		if nn > 0 {
-			e.enc.Encode(e.out[0:], p[0:nn])
-			if _, e.err = e.w.Write(e.out[0 : nn/3*4]); e.err != nil {
-				return n, e.err
-			}
+		e.enc.Encode(e.out[0:], p[0:nn])
+		if _, e.err = e.w.Write(e.out[0 : nn/3*4]); e.err != nil {
+			return n, e.err
 		}
 		n += nn
 		p = p[nn:]
@@ -208,44 +215,50 @@ func (e CorruptInputError) Error() string {
 
 // decode is like Decode but returns an additional 'end' value, which
 // indicates if end-of-message padding was encountered and thus any
-// additional data is an error.
+// additional data is an error. This method assumes that src has been
+// stripped of all supported whitespace ('\r' and '\n').
 func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
-	osrc := src
+	olen := len(src)
 	for len(src) > 0 && !end {
 		// Decode quantum using the base64 alphabet
 		var dbuf [4]byte
 		dlen := 4
 
-		for j := 0; j < 4; {
+		for j := range dbuf {
 			if len(src) == 0 {
-				return n, false, CorruptInputError(len(osrc) - len(src) - j)
+				return n, false, CorruptInputError(olen - len(src) - j)
 			}
 			in := src[0]
 			src = src[1:]
-			if in == '\r' || in == '\n' {
-				// Ignore this character.
-				continue
-			}
-			if in == '=' && j >= 2 && len(src) < 4 {
-				// We've reached the end and there's
-				// padding
-				if len(src) == 0 && j == 2 {
-					// not enough padding
-					return n, false, CorruptInputError(len(osrc))
-				}
-				if len(src) > 0 && src[0] != '=' {
+			if in == '=' {
+				// We've reached the end and there's padding
+				switch j {
+				case 0, 1:
 					// incorrect padding
-					return n, false, CorruptInputError(len(osrc) - len(src) - 1)
+					return n, false, CorruptInputError(olen - len(src) - 1)
+				case 2:
+					// "==" is expected, the first "=" is already consumed.
+					if len(src) == 0 {
+						// not enough padding
+						return n, false, CorruptInputError(olen)
+					}
+					if src[0] != '=' {
+						// incorrect padding
+						return n, false, CorruptInputError(olen - len(src) - 1)
+					}
+					src = src[1:]
 				}
-				dlen = j
-				end = true
+				if len(src) > 0 {
+					// trailing garbage
+					err = CorruptInputError(olen - len(src))
+				}
+				dlen, end = j, true
 				break
 			}
 			dbuf[j] = enc.decodeMap[in]
 			if dbuf[j] == 0xFF {
-				return n, false, CorruptInputError(len(osrc) - len(src) - 1)
+				return n, false, CorruptInputError(olen - len(src) - 1)
 			}
-			j++
 		}
 
 		// Pack 4x 6-bit source blocks into 3 byte destination
@@ -264,7 +277,7 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 		n += dlen - 1
 	}
 
-	return n, end, nil
+	return n, end, err
 }
 
 // Decode decodes src using the encoding enc.  It writes at most
@@ -273,12 +286,14 @@ func (enc *Encoding) decode(dst, src []byte) (n int, end bool, err error) {
 // number of bytes successfully written and CorruptInputError.
 // New line characters (\r and \n) are ignored.
 func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
+	src = bytes.Map(removeNewlinesMapper, src)
 	n, _, err = enc.decode(dst, src)
 	return
 }
 
 // DecodeString returns the bytes represented by the base64 string s.
 func (enc *Encoding) DecodeString(s string) ([]byte, error) {
+	s = strings.Map(removeNewlinesMapper, s)
 	dbuf := make([]byte, enc.DecodedLen(len(s)))
 	n, err := enc.Decode(dbuf, []byte(s))
 	return dbuf[:n], err
@@ -343,9 +358,34 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 	return n, d.err
 }
 
+type newlineFilteringReader struct {
+	wrapped io.Reader
+}
+
+func (r *newlineFilteringReader) Read(p []byte) (int, error) {
+	n, err := r.wrapped.Read(p)
+	for n > 0 {
+		offset := 0
+		for i, b := range p[0:n] {
+			if b != '\r' && b != '\n' {
+				if i != offset {
+					p[offset] = b
+				}
+				offset++
+			}
+		}
+		if offset > 0 {
+			return offset, err
+		}
+		// Previous buffer entirely whitespace, read again
+		n, err = r.wrapped.Read(p)
+	}
+	return n, err
+}
+
 // NewDecoder constructs a new base64 stream decoder.
 func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
-	return &decoder{enc: enc, r: r}
+	return &decoder{enc: enc, r: &newlineFilteringReader{r}}
 }
 
 // DecodedLen returns the maximum length in bytes of the decoded data

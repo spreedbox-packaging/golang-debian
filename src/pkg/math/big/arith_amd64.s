@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../../cmd/ld/textflag.h"
+
 // This file provides fast assembly versions for the elementary
 // arithmetic operations on vectors implemented in arith.go.
 
@@ -16,7 +18,7 @@
 		BYTE $0x00
 
 // func mulWW(x, y Word) (z1, z0 Word)
-TEXT ·mulWW(SB),7,$0
+TEXT ·mulWW(SB),NOSPLIT,$0
 	MOVQ x+0(FP), AX
 	MULQ y+8(FP)
 	MOVQ DX, z1+16(FP)
@@ -25,7 +27,7 @@ TEXT ·mulWW(SB),7,$0
 
 
 // func divWW(x1, x0, y Word) (q, r Word)
-TEXT ·divWW(SB),7,$0
+TEXT ·divWW(SB),NOSPLIT,$0
 	MOVQ x1+0(FP), DX
 	MOVQ x0+8(FP), AX
 	DIVQ y+16(FP)
@@ -35,8 +37,8 @@ TEXT ·divWW(SB),7,$0
 
 
 // func addVV(z, x, y []Word) (c Word)
-TEXT ·addVV(SB),7,$0
-	MOVQ z+8(FP), DI
+TEXT ·addVV(SB),NOSPLIT,$0
+	MOVQ z_len+8(FP), DI
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), R9
 	MOVQ z+0(FP), R10
@@ -89,8 +91,8 @@ E1:	MOVQ CX, c+72(FP)	// return c
 
 // func subVV(z, x, y []Word) (c Word)
 // (same as addVV except for SBBQ instead of ADCQ and label names)
-TEXT ·subVV(SB),7,$0
-	MOVQ z+8(FP), DI
+TEXT ·subVV(SB),NOSPLIT,$0
+	MOVQ z_len+8(FP), DI
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), R9
 	MOVQ z+0(FP), R10
@@ -142,8 +144,8 @@ E2:	MOVQ CX, c+72(FP)	// return c
 
 
 // func addVW(z, x []Word, y Word) (c Word)
-TEXT ·addVW(SB),7,$0
-	MOVQ z+8(FP), DI
+TEXT ·addVW(SB),NOSPLIT,$0
+	MOVQ z_len+8(FP), DI
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), CX	// c = y
 	MOVQ z+0(FP), R10
@@ -194,8 +196,8 @@ E3:	MOVQ CX, c+56(FP)	// return c
 
 // func subVW(z, x []Word, y Word) (c Word)
 // (same as addVW except for SUBQ/SBBQ instead of ADDQ/ADCQ and label names)
-TEXT ·subVW(SB),7,$0
-	MOVQ z+8(FP), DI
+TEXT ·subVW(SB),NOSPLIT,$0
+	MOVQ z_len+8(FP), DI
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), CX	// c = y
 	MOVQ z+0(FP), R10
@@ -246,8 +248,8 @@ E4:	MOVQ CX, c+56(FP)	// return c
 
 
 // func shlVU(z, x []Word, s uint) (c Word)
-TEXT ·shlVU(SB),7,$0
-	MOVQ z+8(FP), BX	// i = z
+TEXT ·shlVU(SB),NOSPLIT,$0
+	MOVQ z_len+8(FP), BX	// i = z
 	SUBQ $1, BX		// i--
 	JL X8b			// i < 0	(n <= 0)
 
@@ -281,8 +283,8 @@ X8b:	MOVQ $0, c+56(FP)
 
 
 // func shrVU(z, x []Word, s uint) (c Word)
-TEXT ·shrVU(SB),7,$0
-	MOVQ z+8(FP), R11
+TEXT ·shrVU(SB),NOSPLIT,$0
+	MOVQ z_len+8(FP), R11
 	SUBQ $1, R11		// n--
 	JL X9b			// n < 0	(n <= 0)
 
@@ -318,12 +320,12 @@ X9b:	MOVQ $0, c+56(FP)
 
 
 // func mulAddVWW(z, x []Word, y, r Word) (c Word)
-TEXT ·mulAddVWW(SB),7,$0
+TEXT ·mulAddVWW(SB),NOSPLIT,$0
 	MOVQ z+0(FP), R10
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), R9
 	MOVQ r+56(FP), CX	// c = r
-	MOVQ z+8(FP), R11
+	MOVQ z_len+8(FP), R11
 	MOVQ $0, BX		// i = 0
 	JMP E5
 
@@ -343,11 +345,11 @@ E5:	CMPQ BX, R11		// i < n
 
 
 // func addMulVVW(z, x []Word, y Word) (c Word)
-TEXT ·addMulVVW(SB),7,$0
+TEXT ·addMulVVW(SB),NOSPLIT,$0
 	MOVQ z+0(FP), R10
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), R9
-	MOVQ z+8(FP), R11
+	MOVQ z_len+8(FP), R11
 	MOVQ $0, BX		// i = 0
 	MOVQ $0, CX		// c = 0
 	JMP E6
@@ -369,12 +371,12 @@ E6:	CMPQ BX, R11		// i < n
 
 
 // func divWVW(z []Word, xn Word, x []Word, y Word) (r Word)
-TEXT ·divWVW(SB),7,$0
+TEXT ·divWVW(SB),NOSPLIT,$0
 	MOVQ z+0(FP), R10
 	MOVQ xn+24(FP), DX	// r = xn
 	MOVQ x+32(FP), R8
 	MOVQ y+56(FP), R9
-	MOVQ z+8(FP), BX	// i = z
+	MOVQ z_len+8(FP), BX	// i = z
 	JMP E7
 
 L7:	MOVQ (R8)(BX*8), AX
@@ -388,7 +390,7 @@ E7:	SUBQ $1, BX		// i--
 	RET
 
 // func bitLen(x Word) (n int)
-TEXT ·bitLen(SB),7,$0
+TEXT ·bitLen(SB),NOSPLIT,$0
 	BSRQ x+0(FP), AX
 	JZ Z1
 	ADDQ $1, AX

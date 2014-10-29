@@ -3,12 +3,9 @@
 // license that can be found in the LICENSE file.
 
 // Plan 9-specific system calls
-int32	runtime·open(uint8 *file, int32 mode);
 int32	runtime·pread(int32 fd, void *buf, int32 nbytes, int64 offset);
 int32	runtime·pwrite(int32 fd, void *buf, int32 nbytes, int64 offset);
-int32	runtime·read(int32 fd, void *buf, int32 nbytes);
 int64	runtime·seek(int32 fd, int64 offset, int32 whence);
-int32	runtime·close(int32 fd);
 void	runtime·exits(int8* msg);
 intptr	runtime·brk_(void*);
 int32	runtime·sleep(int32 ms);
@@ -19,7 +16,6 @@ int32 	runtime·plan9_semrelease(uint32 *addr, int32 count);
 int32	runtime·notify(void (*fn)(void*, int8*));
 int32	runtime·noted(int32);
 void	runtime·sigtramp(void*, int8*);
-int32	runtime·sighandler(void*, int8*, G*);
 void	runtime·sigpanic(void);
 void	runtime·goexitsall(int8*);
 void	runtime·setfpmasks(void);
@@ -82,5 +78,12 @@ struct Tos {
 	/* top of stack is here */
 };
 
-#define	NSIG	5	/* number of signals in runtime·SigTab array */
+#define	NSIG	14	/* number of signals in runtime·SigTab array */
 #define	ERRMAX	128	/* max length of note string */
+
+/* Notes in runtime·sigtab that are handled by runtime·sigpanic. */
+#define	SIGRFAULT	2
+#define	SIGWFAULT	3
+#define	SIGINTDIV	4
+#define	SIGFLOAT	5
+#define	SIGTRAP		6

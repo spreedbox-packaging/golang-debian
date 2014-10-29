@@ -10,8 +10,8 @@ package driver
 
 import "errors"
 
-// A driver Value is a value that drivers must be able to handle.
-// A Value is either nil or an instance of one of these types:
+// Value is a value that drivers must be able to handle.
+// It is either nil or an instance of one of these types:
 //
 //   int64
 //   float64
@@ -134,14 +134,14 @@ type Stmt interface {
 	// as an INSERT or UPDATE.
 	Exec(args []Value) (Result, error)
 
-	// Exec executes a query that may return rows, such as a
+	// Query executes a query that may return rows, such as a
 	// SELECT.
 	Query(args []Value) (Rows, error)
 }
 
 // ColumnConverter may be optionally implemented by Stmt if the
-// the statement is aware of its own columns' types and can
-// convert from any type to a driver Value.
+// statement is aware of its own columns' types and can convert from
+// any type to a driver Value.
 type ColumnConverter interface {
 	// ColumnConverter returns a ValueConverter for the provided
 	// column index.  If the type of a specific column isn't known

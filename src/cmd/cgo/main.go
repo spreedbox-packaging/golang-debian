@@ -33,7 +33,7 @@ type Package struct {
 	PtrSize     int64
 	IntSize     int64
 	GccOptions  []string
-	CgoFlags    map[string]string // #cgo flags (CFLAGS, LDFLAGS)
+	CgoFlags    map[string][]string // #cgo flags (CFLAGS, LDFLAGS)
 	Written     map[string]bool
 	Name        map[string]*Name // accumulated Name from Files
 	ExpFunc     []*ExpFunc       // accumulated ExpFunc from Files
@@ -80,11 +80,16 @@ type Name struct {
 	Mangle   string // name used in generated Go
 	C        string // name used in C
 	Define   string // #define expansion
-	Kind     string // "const", "type", "var", "func", "not-type"
+	Kind     string // "const", "type", "var", "fpvar", "func", "not-type"
 	Type     *Type  // the type of xxx
 	FuncType *FuncType
 	AddError bool
 	Const    string // constant definition
+}
+
+// IsVar returns true if Kind is either "var" or "fpvar"
+func (n *Name) IsVar() bool {
+	return n.Kind == "var" || n.Kind == "fpvar"
 }
 
 // A ExpFunc is an exported function, callable from C.
@@ -142,6 +147,7 @@ var fset = token.NewFileSet()
 
 var dynobj = flag.String("dynimport", "", "if non-empty, print dynamic import data for that file")
 var dynout = flag.String("dynout", "", "write -dynobj output to this file")
+var dynlinker = flag.Bool("dynlinker", false, "record dynamic linker information in dynimport mode")
 
 // These flags are for bootstrapping a new Go implementation,
 // to generate Go and C headers that match the data layout and
@@ -207,6 +213,15 @@ func main() {
 
 	p := newPackage(args[:i])
 
+	// Record CGO_LDFLAGS from the environment for external linking.
+	if ldflags := os.Getenv("CGO_LDFLAGS"); ldflags != "" {
+		args, err := splitQuoted(ldflags)
+		if err != nil {
+			fatalf("bad CGO_LDFLAGS: %q (%s)", ldflags, err)
+		}
+		p.addToFlag("LDFLAGS", args)
+	}
+
 	// Need a unique prefix for the global C symbols that
 	// we use to coordinate between gcc and ourselves.
 	// We already put _cgo_ at the beginning, so the main
@@ -225,10 +240,9 @@ func main() {
 
 	fs := make([]*File, len(goFiles))
 	for i, input := range goFiles {
-		// Parse flags for all files before translating due to CFLAGS.
 		f := new(File)
 		f.ReadGo(input)
-		p.ParseFlags(f, input)
+		f.DiscardCgoDirectives()
 		fs[i] = f
 	}
 
@@ -281,11 +295,6 @@ func main() {
 // newPackage returns a new Package that will invoke
 // gcc with the additional arguments specified in args.
 func newPackage(args []string) *Package {
-	// Copy the gcc options to a new slice so the list
-	// can grow without overwriting the slice that args is in.
-	gccOptions := make([]string, len(args))
-	copy(gccOptions, args)
-
 	goarch = runtime.GOARCH
 	if s := os.Getenv("GOARCH"); s != "" {
 		goarch = s
@@ -308,12 +317,12 @@ func newPackage(args []string) *Package {
 	os.Setenv("LC_ALL", "C")
 
 	p := &Package{
-		PtrSize:    ptrSize,
-		IntSize:    intSize,
-		GccOptions: gccOptions,
-		CgoFlags:   make(map[string]string),
-		Written:    make(map[string]bool),
+		PtrSize:  ptrSize,
+		IntSize:  intSize,
+		CgoFlags: make(map[string][]string),
+		Written:  make(map[string]bool),
 	}
+	p.addToFlag("CFLAGS", args)
 	return p
 }
 
@@ -332,7 +341,7 @@ func (p *Package) Record(f *File) {
 			if p.Name[k] == nil {
 				p.Name[k] = v
 			} else if !reflect.DeepEqual(p.Name[k], v) {
-				error_(token.NoPos, "inconsistent definitions for C.%s", k)
+				error_(token.NoPos, "inconsistent definitions for C.%s", fixGo(k))
 			}
 		}
 	}

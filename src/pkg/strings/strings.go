@@ -26,7 +26,11 @@ func explode(s string, n int) []string {
 	i, cur := 0, 0
 	for ; i+1 < n; i++ {
 		ch, size = utf8.DecodeRuneInString(s[cur:])
-		a[i] = string(ch)
+		if ch == utf8.RuneError {
+			a[i] = string(utf8.RuneError)
+		} else {
+			a[i] = s[cur : cur+size]
+		}
 		cur += size
 	}
 	// add the rest, if there is any
@@ -126,14 +130,7 @@ func Index(s, sep string) int {
 	case n == 0:
 		return 0
 	case n == 1:
-		c := sep[0]
-		// special case worth making fast
-		for i := 0; i < len(s); i++ {
-			if s[i] == c {
-				return i
-			}
-		}
-		return -1
+		return IndexByte(s, sep[0])
 	case n == len(s):
 		if sep == s {
 			return 0
@@ -428,10 +425,7 @@ func Repeat(s string, count int) string {
 	b := make([]byte, len(s)*count)
 	bp := 0
 	for i := 0; i < count; i++ {
-		for j := 0; j < len(s); j++ {
-			b[bp] = s[j]
-			bp++
-		}
+		bp += copy(b[bp:], s)
 	}
 	return string(b)
 }
@@ -488,10 +482,10 @@ func isSeparator(r rune) bool {
 	return unicode.IsSpace(r)
 }
 
-// BUG(r): The rule Title uses for word boundaries does not handle Unicode punctuation properly.
-
 // Title returns a copy of the string s with all Unicode letters that begin words
 // mapped to their title case.
+//
+// BUG: The rule Title uses for word boundaries does not handle Unicode punctuation properly.
 func Title(s string) string {
 	// Use a closure here to remember state.
 	// Hackish but effective. Depends on Map scanning in order and calling

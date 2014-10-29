@@ -22,19 +22,22 @@ Mpflt*
 truncfltlit(Mpflt *oldv, Type *t)
 {
 	double d;
-	float f;
 	Mpflt *fv;
+	Val v;
 
 	if(t == T)
 		return oldv;
+
+	memset(&v, 0, sizeof v);
+	v.ctype = CTFLT;
+	v.u.fval = oldv;
+	overflow(v, t);
 
 	fv = mal(sizeof *fv);
 	*fv = *oldv;
 
 	// convert large precision literal floating
 	// into limited precision (float64 or float32)
-	// botch -- this assumes that compiler fp
-	//    has same precision as runtime fp
 	switch(t->etype) {
 	case TFLOAT64:
 		d = mpgetflt(fv);
@@ -42,10 +45,9 @@ truncfltlit(Mpflt *oldv, Type *t)
 		break;
 
 	case TFLOAT32:
-		d = mpgetflt(fv);
-		f = d;
-		d = f;
+		d = mpgetflt32(fv);
 		mpmovecflt(fv, d);
+
 		break;
 	}
 	return fv;
@@ -118,6 +120,27 @@ convlit1(Node **np, Type *t, int explicit)
 			t = T;
 		}
 		n->type = t;
+		return;
+	case OCOMPLEX:
+		if(n->type->etype == TIDEAL) {
+			switch(t->etype) {
+			default:
+				// If trying to convert to non-complex type,
+				// leave as complex128 and let typechecker complain.
+				t = types[TCOMPLEX128];
+				//fallthrough
+			case TCOMPLEX128:
+				n->type = t;
+				convlit(&n->left, types[TFLOAT64]);
+				convlit(&n->right, types[TFLOAT64]);
+				break;
+			case TCOMPLEX64:
+				n->type = t;
+				convlit(&n->left, types[TFLOAT32]);
+				convlit(&n->right, types[TFLOAT32]);
+				break;
+			}
+		}
 		return;
 	}
 
@@ -214,7 +237,6 @@ convlit1(Node **np, Type *t, int explicit)
 				n->val = toflt(n->val);
 				// flowthrough
 			case CTFLT:
-				overflow(n->val, t);
 				n->val.u.fval = truncfltlit(n->val.u.fval, t);
 				break;
 			}
@@ -500,6 +522,7 @@ evconst(Node *n)
 	int wl, wr, lno, et;
 	Val v, rv;
 	Mpint b;
+	NodeList *l1, *l2;
 
 	// pick off just the opcodes that can be
 	// constant evaluated.
@@ -507,7 +530,6 @@ evconst(Node *n)
 	default:
 		return;
 	case OADD:
-	case OADDSTR:
 	case OAND:
 	case OANDAND:
 	case OANDNOT:
@@ -538,6 +560,47 @@ evconst(Node *n)
 		if(!okforconst[n->type->etype] && n->type->etype != TNIL)
 			return;
 		break;
+	
+	case OADDSTR:
+		// merge adjacent constants in the argument list.
+		for(l1=n->list; l1 != nil; l1= l1->next) {
+			if(isconst(l1->n, CTSTR) && l1->next != nil && isconst(l1->next->n, CTSTR)) {
+				l2 = l1;
+				len = 0;
+				while(l2 != nil && isconst(l2->n, CTSTR)) {
+					nr = l2->n;
+					len += nr->val.u.sval->len;
+					l2 = l2->next;
+				}
+				// merge from l1 up to but not including l2
+				str = mal(sizeof(*str) + len);
+				str->len = len;
+				len = 0;
+				l2 = l1;
+				while(l2 != nil && isconst(l2->n, CTSTR)) {
+					nr = l2->n;
+					memmove(str->s+len, nr->val.u.sval->s, nr->val.u.sval->len);
+					len += nr->val.u.sval->len;
+					l2 = l2->next;
+				}
+				nl = nod(OXXX, N, N);
+				*nl = *l1->n;
+				nl->orig = nl;
+				nl->val.ctype = CTSTR;
+				nl->val.u.sval = str;
+				l1->n = nl;
+				l1->next = l2;
+			}
+		}
+		// fix list end pointer.
+		for(l2=n->list; l2 != nil; l2=l2->next)
+			n->list->end = l2;
+		// collapse single-constant list to single constant.
+		if(count(n->list) == 1 && isconst(n->list->n, CTSTR)) {
+			n->op = OLITERAL;
+			n->val = n->list->n->val;
+		}
+		return;
 	}
 
 	nl = n->left;
@@ -840,15 +903,6 @@ evconst(Node *n)
 		if(cmpslit(nl, nr) > 0)
 			goto settrue;
 		goto setfalse;
-	case TUP(OADDSTR, CTSTR):
-		len = v.u.sval->len + rv.u.sval->len;
-		str = mal(sizeof(*str) + len);
-		str->len = len;
-		memcpy(str->s, v.u.sval->s, v.u.sval->len);
-		memcpy(str->s+v.u.sval->len, rv.u.sval->s, rv.u.sval->len);
-		str->len = len;
-		v.u.sval = str;
-		break;
 
 	case TUP(OOROR, CTBOOL):
 		if(v.u.bval || rv.u.bval)
@@ -897,6 +951,7 @@ unary:
 	case TUP(OCONV, CTFLT):
 	case TUP(OCONV, CTSTR):
 		convlit1(&nl, n->type, 1);
+		v = nl->val;
 		break;
 
 	case TUP(OPLUS, CTINT):
@@ -1034,133 +1089,149 @@ nodcplxlit(Val r, Val i)
 	return n;
 }
 
-// TODO(rsc): combine with convlit
+// idealkind returns a constant kind like consttype
+// but for an arbitrary "ideal" (untyped constant) expression.
+static int
+idealkind(Node *n)
+{
+	int k1, k2;
+
+	if(n == N || !isideal(n->type))
+		return CTxxx;
+
+	switch(n->op) {
+	default:
+		return CTxxx;
+	case OLITERAL:
+		return n->val.ctype;
+	case OADD:
+	case OAND:
+	case OANDNOT:
+	case OCOM:
+	case ODIV:
+	case OMINUS:
+	case OMOD:
+	case OMUL:
+	case OSUB:
+	case OXOR:
+	case OOR:
+	case OPLUS:
+		// numeric kinds.
+		k1 = idealkind(n->left);
+		k2 = idealkind(n->right);
+		if(k1 > k2)
+			return k1;
+		else
+			return k2;
+	case OREAL:
+	case OIMAG:
+		return CTFLT;
+	case OCOMPLEX:
+		return CTCPLX;
+	case OADDSTR:
+		return CTSTR;
+	case OANDAND:
+	case OEQ:
+	case OGE:
+	case OGT:
+	case OLE:
+	case OLT:
+	case ONE:
+	case ONOT:
+	case OOROR:
+	case OCMPSTR:
+	case OCMPIFACE:
+		return CTBOOL;
+	case OLSH:
+	case ORSH:
+		// shifts (beware!).
+		return idealkind(n->left);
+	}
+}
+
 void
 defaultlit(Node **np, Type *t)
 {
 	int lno;
+	int ctype;
 	Node *n, *nn;
+	Type *t1;
 
 	n = *np;
 	if(n == N || !isideal(n->type))
 		return;
 
-	switch(n->op) {
-	case OLITERAL:
+	if(n->op == OLITERAL) {
 		nn = nod(OXXX, N, N);
 		*nn = *n;
 		n = nn;
 		*np = n;
-		break;
-	case OLSH:
-	case ORSH:
-		defaultlit(&n->left, t);
-		t = n->left->type;
-		if(t != T && !isint[t->etype]) {
-			yyerror("invalid operation: %N (shift of type %T)", n, t);
-			t = T;
-		}
-		n->type = t;
-		return;
-	case OCOM:
-	case ONOT:
-		defaultlit(&n->left, t);
-		n->type = n->left->type;
-		return;
-	default:
-		if(n->left == N || n->right == N) {
-			dump("defaultlit", n);
-			fatal("defaultlit");
-		}
-		// n is ideal, so left and right must both be ideal.
-		// n has not been computed as a constant value,
-		// so either left or right must not be constant.
-		// The only 'ideal' non-constant expressions are shifts.  Ugh.
-		// If one of these is a shift and the other is not, use that type.
-		// When compiling x := 1<<i + 3.14, this means we try to push
-		// the float64 down into the 1<<i, producing the correct error
-		// (cannot shift float64).
-		//
-		// If t is an interface type, we want the default type for the
-		// value, so just do as if no type was given.
-		if(t && t->etype == TINTER)
-			t = T;
-		if(t == T && (n->right->op == OLSH || n->right->op == ORSH)) {
-			defaultlit(&n->left, T);
-			defaultlit(&n->right, n->left->type);
-		} else if(t == T && (n->left->op == OLSH || n->left->op == ORSH)) {
-			defaultlit(&n->right, T);
-			defaultlit(&n->left, n->right->type);
-		} else if(iscmp[n->op]) {
-			defaultlit2(&n->left, &n->right, 1);
-		} else {
-			defaultlit(&n->left, t);
-			defaultlit(&n->right, t);
-		}
-		if(n->type == idealbool || n->type == idealstring) {
-			if(t != T && t->etype == n->type->etype)
-				n->type = t;
-			else
-				n->type = types[n->type->etype];
-		} else
-			n->type = n->left->type;
-		return;
 	}
 
 	lno = setlineno(n);
-	switch(n->val.ctype) {
+	ctype = idealkind(n);
+	switch(ctype) {
 	default:
 		if(t != T) {
 			convlit(np, t);
-			break;
+			return;
 		}
 		if(n->val.ctype == CTNIL) {
 			lineno = lno;
-			yyerror("use of untyped nil");
+			if(!n->diag) {
+				yyerror("use of untyped nil");
+				n->diag = 1;
+			}
 			n->type = T;
 			break;
 		}
 		if(n->val.ctype == CTSTR) {
-			n->type = types[TSTRING];
+			t1 = types[TSTRING];
+			convlit(np, t1);
 			break;
 		}
 		yyerror("defaultlit: unknown literal: %N", n);
 		break;
+	case CTxxx:
+		fatal("defaultlit: idealkind is CTxxx: %+N", n);
+		break;
 	case CTBOOL:
-		n->type = types[TBOOL];
+		t1 = types[TBOOL];
 		if(t != T && t->etype == TBOOL)
-			n->type = t;
+			t1 = t;
+		convlit(np, t1);
 		break;
 	case CTINT:
-		n->type = types[TINT];
+		t1 = types[TINT];
 		goto num;
 	case CTRUNE:
-		n->type = runetype;
+		t1 = runetype;
 		goto num;
 	case CTFLT:
-		n->type = types[TFLOAT64];
+		t1 = types[TFLOAT64];
 		goto num;
 	case CTCPLX:
-		n->type = types[TCOMPLEX128];
+		t1 = types[TCOMPLEX128];
 		goto num;
 	num:
 		if(t != T) {
 			if(isint[t->etype]) {
-				n->type = t;
+				t1 = t;
 				n->val = toint(n->val);
 			}
 			else
 			if(isfloat[t->etype]) {
-				n->type = t;
+				t1 = t;
 				n->val = toflt(n->val);
 			}
 			else
 			if(iscomplex[t->etype]) {
-				n->type = t;
+				t1 = t;
 				n->val = tocplx(n->val);
 			}
 		}
-		overflow(n->val, n->type);
+		overflow(n->val, t1);
+		convlit(np, t1);
 		break;
 	}
 	lineno = lno;
@@ -1176,6 +1247,7 @@ void
 defaultlit2(Node **lp, Node **rp, int force)
 {
 	Node *l, *r;
+	int lkind, rkind;
 
 	l = *lp;
 	r = *rp;
@@ -1195,18 +1267,20 @@ defaultlit2(Node **lp, Node **rp, int force)
 		convlit(lp, types[TBOOL]);
 		convlit(rp, types[TBOOL]);
 	}
-	if(isconst(l, CTCPLX) || isconst(r, CTCPLX)) {
+	lkind = idealkind(l);
+	rkind = idealkind(r);
+	if(lkind == CTCPLX || rkind == CTCPLX) {
 		convlit(lp, types[TCOMPLEX128]);
 		convlit(rp, types[TCOMPLEX128]);
 		return;
 	}
-	if(isconst(l, CTFLT) || isconst(r, CTFLT)) {
+	if(lkind == CTFLT || rkind == CTFLT) {
 		convlit(lp, types[TFLOAT64]);
 		convlit(rp, types[TFLOAT64]);
 		return;
 	}
 
-	if(isconst(l, CTRUNE) || isconst(r, CTRUNE)) {
+	if(lkind == CTRUNE || rkind == CTRUNE) {
 		convlit(lp, runetype);
 		convlit(rp, runetype);
 		return;
@@ -1522,7 +1596,7 @@ isgoconst(Node *n)
 
 	case ONAME:
 		l = n->sym->def;
-		if(l->op == OLITERAL && n->val.ctype != CTNIL)
+		if(l && l->op == OLITERAL && n->val.ctype != CTNIL)
 			return 1;
 		break;
 	
@@ -1557,10 +1631,25 @@ hascallchan(Node *n)
 	if(n == N)
 		return 0;
 	switch(n->op) {
+	case OAPPEND:
 	case OCALL:
 	case OCALLFUNC:
-	case OCALLMETH:
 	case OCALLINTER:
+	case OCALLMETH:
+	case OCAP:
+	case OCLOSE:
+	case OCOMPLEX:
+	case OCOPY:
+	case ODELETE:
+	case OIMAG:
+	case OLEN:
+	case OMAKE:
+	case ONEW:
+	case OPANIC:
+	case OPRINT:
+	case OPRINTN:
+	case OREAL:
+	case ORECOVER:
 	case ORECV:
 		return 1;
 	}

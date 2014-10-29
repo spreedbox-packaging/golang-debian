@@ -102,14 +102,14 @@ struct PeSym {
 	uint16 type;
 	uint8 sclass;
 	uint8 aux;
-	Sym* sym;
+	LSym* sym;
 };
 
 struct PeSect {
 	char* name;
 	uchar* base;
 	uint64 size;
-	Sym* sym;
+	LSym* sym;
 	IMAGE_SECTION_HEADER sh;
 };
 
@@ -135,12 +135,13 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 {
 	char *name;
 	int32 base;
-	int i, j, l, numaux;
+	uint32 l;
+	int i, j, numaux;
 	PeObj *obj;
 	PeSect *sect, *rsect;
 	IMAGE_SECTION_HEADER sh;
 	uchar symbuf[18];
-	Sym *s;
+	LSym *s;
 	Reloc *r, *rp;
 	PeSym *sym;
 
@@ -149,7 +150,7 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 		Bprint(&bso, "%5.2f ldpe %s\n", cputime(), pn);
 	
 	sect = nil;
-	version++;
+	ctxt->version++;
 	base = Boffset(f);
 	
 	obj = mal(sizeof *obj);
@@ -170,11 +171,12 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 		// TODO return error if found .cormeta
 	}
 	// load string table
-	Bseek(f, base+obj->fh.PointerToSymbolTable+18*obj->fh.NumberOfSymbols, 0);
-	if(Bread(f, &l, sizeof l) != sizeof l) 
+	Bseek(f, base+obj->fh.PointerToSymbolTable+sizeof(symbuf)*obj->fh.NumberOfSymbols, 0);
+	if(Bread(f, symbuf, 4) != 4) 
 		goto bad;
+	l = le32(symbuf);
 	obj->snames = mal(l);
-	Bseek(f, base+obj->fh.PointerToSymbolTable+18*obj->fh.NumberOfSymbols, 0);
+	Bseek(f, base+obj->fh.PointerToSymbolTable+sizeof(symbuf)*obj->fh.NumberOfSymbols, 0);
 	if(Bread(f, obj->snames, l) != l)
 		goto bad;
 	// read symbols
@@ -209,11 +211,18 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 		sect = &obj->sect[i];
 		if(sect->sh.Characteristics&IMAGE_SCN_MEM_DISCARDABLE)
 			continue;
+
+		if((sect->sh.Characteristics&(IMAGE_SCN_CNT_CODE|IMAGE_SCN_CNT_INITIALIZED_DATA|IMAGE_SCN_CNT_UNINITIALIZED_DATA)) == 0) {
+			// This has been seen for .idata sections, which we
+			// want to ignore.  See issues 5106 and 5273.
+			continue;
+		}
+
 		if(map(obj, sect) < 0)
 			goto bad;
 		
 		name = smprint("%s(%s)", pkg, sect->name);
-		s = lookup(name, version);
+		s = linklookup(ctxt, name, ctxt->version);
 		free(name);
 		switch(sect->sh.Characteristics&(IMAGE_SCN_CNT_UNINITIALIZED_DATA|IMAGE_SCN_CNT_INITIALIZED_DATA|
 			IMAGE_SCN_MEM_READ|IMAGE_SCN_MEM_WRITE|IMAGE_SCN_CNT_CODE|IMAGE_SCN_MEM_EXECUTE)) {
@@ -230,19 +239,12 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 				s->type = STEXT;
 				break;
 			default:
-				werrstr("unexpected flags for PE section %s", sect->name);
+				werrstr("unexpected flags %#08ux for PE section %s", sect->sh.Characteristics, sect->name);
 				goto bad;
 		}
 		s->p = sect->base;
 		s->np = sect->size;
 		s->size = sect->size;
-		if(s->type == STEXT) {
-			if(etextp)
-				etextp->next = s;
-			else
-				textp = s;
-			etextp = s;
-		}
 		sect->sym = s;
 		if(strcmp(sect->name, ".rsrc") == 0)
 			setpersrc(sect->sym);
@@ -255,6 +257,11 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 			continue;
 		if(rsect->sh.Characteristics&IMAGE_SCN_MEM_DISCARDABLE)
 			continue;
+		if((sect->sh.Characteristics&(IMAGE_SCN_CNT_CODE|IMAGE_SCN_CNT_INITIALIZED_DATA|IMAGE_SCN_CNT_UNINITIALIZED_DATA)) == 0) {
+			// This has been seen for .idata sections, which we
+			// want to ignore.  See issues 5106 and 5273.
+			continue;
+		}
 		r = mal(rsect->sh.NumberOfRelocations*sizeof r[0]);
 		Bseek(f, obj->base+rsect->sh.PointerToRelocations, 0);
 		for(j=0; j<rsect->sh.NumberOfRelocations; j++) {
@@ -283,18 +290,18 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 				case IMAGE_REL_AMD64_REL32:
 				case IMAGE_REL_AMD64_ADDR32: // R_X86_64_PC32
 				case IMAGE_REL_AMD64_ADDR32NB:
-					rp->type = D_PCREL;
-					rp->add = le32(rsect->base+rp->off);
+					rp->type = R_PCREL;
+					rp->add = (int32)le32(rsect->base+rp->off);
 					break;
 				case IMAGE_REL_I386_DIR32NB:
 				case IMAGE_REL_I386_DIR32:
-					rp->type = D_ADDR;
+					rp->type = R_ADDR;
 					// load addend from image
-					rp->add = le32(rsect->base+rp->off);
+					rp->add = (int32)le32(rsect->base+rp->off);
 					break;
 				case IMAGE_REL_AMD64_ADDR64: // R_X86_64_64
 					rp->siz = 8;
-					rp->type = D_ADDR;
+					rp->type = R_ADDR;
 					// load addend from image
 					rp->add = le64(rsect->base+rp->off);
 					break;
@@ -345,6 +352,13 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 
 		if(sect == nil) 
 			return;
+
+		if(s->outer != S) {
+			if(s->dupok)
+				continue;
+			diag("%s: duplicate symbol reference: %s in both %s and %s", pn, s->name, s->outer->name, sect->sym->name);
+			errorexit();
+		}
 		s->sub = sect->sym->sub;
 		sect->sym->sub = s;
 		s->type = sect->sym->type | SSUB;
@@ -352,24 +366,36 @@ ldpe(Biobuf *f, char *pkg, int64 len, char *pn)
 		s->size = 4;
 		s->outer = sect->sym;
 		if(sect->sym->type == STEXT) {
-			Prog *p;
-	
-			if(s->text != P)
+			if(s->external && !s->dupok)
 				diag("%s: duplicate definition of %s", pn, s->name);
-			// build a TEXT instruction with a unique pc
-			// just to make the rest of the linker happy.
-			p = prg();
-			p->as = ATEXT;
-			p->from.type = D_EXTERN;
-			p->from.sym = s;
-			p->textflag = 7;
-			p->to.type = D_CONST;
-			p->link = nil;
-			p->pc = pc++;
-			s->text = p;
-	
-			etextp->next = s;
-			etextp = s;
+			s->external = 1;
+		}
+	}
+
+	// Sort outer lists by address, adding to textp.
+	// This keeps textp in increasing address order.
+	for(i=0; i<obj->nsect; i++) {
+		s = obj->sect[i].sym;
+		if(s == S)
+			continue;
+		if(s->sub)
+			s->sub = listsort(s->sub, valuecmp, offsetof(LSym, sub));
+		if(s->type == STEXT) {
+			if(s->onlist)
+				sysfatal("symbol %s listed multiple times", s->name);
+			s->onlist = 1;
+			if(ctxt->etextp)
+				ctxt->etextp->next = s;
+			else
+				ctxt->textp = s;
+			ctxt->etextp = s;
+			for(s = s->sub; s != S; s = s->sub) {
+				if(s->onlist)
+					sysfatal("symbol %s listed multiple times", s->name);
+				s->onlist = 1;
+				ctxt->etextp->next = s;
+				ctxt->etextp = s;
+			}
 		}
 	}
 
@@ -398,7 +424,7 @@ map(PeObj *obj, PeSect *sect)
 static int
 readsym(PeObj *obj, int i, PeSym **y)
 {
-	Sym *s;
+	LSym *s;
 	PeSym *sym;
 	char *name, *p;
 
@@ -432,11 +458,13 @@ readsym(PeObj *obj, int i, PeSym **y)
 	case IMAGE_SYM_DTYPE_NULL:
 		switch(sym->sclass) {
 		case IMAGE_SYM_CLASS_EXTERNAL: //global
-			s = lookup(name, 0);
+			s = linklookup(ctxt, name, 0);
 			break;
 		case IMAGE_SYM_CLASS_NULL:
 		case IMAGE_SYM_CLASS_STATIC:
-			s = lookup(name, version);
+		case IMAGE_SYM_CLASS_LABEL:
+			s = linklookup(ctxt, name, ctxt->version);
+			s->dupok = 1;
 			break;
 		default:
 			werrstr("%s: invalid symbol binding %d", sym->name, sym->sclass);

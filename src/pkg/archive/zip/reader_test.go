@@ -64,6 +64,24 @@ var tests = []ZipTest{
 		},
 	},
 	{
+		Name:    "test-trailing-junk.zip",
+		Comment: "This is a zipfile comment.",
+		File: []ZipTestFile{
+			{
+				Name:    "test.txt",
+				Content: []byte("This is a test text file.\n"),
+				Mtime:   "09-05-10 12:12:02",
+				Mode:    0644,
+			},
+			{
+				Name:  "gophercolor16x16.png",
+				File:  "gophercolor16x16.png",
+				Mtime: "09-05-10 15:52:58",
+				Mode:  0644,
+			},
+		},
+	},
+	{
 		Name:   "r.zip",
 		Source: returnRecursiveZip,
 		File: []ZipTestFile{
@@ -217,6 +235,18 @@ var tests = []ZipTest{
 			},
 		},
 	},
+	// Another zip64 file with different Extras fields. (golang.org/issue/7069)
+	{
+		Name: "zip64-2.zip",
+		File: []ZipTestFile{
+			{
+				Name:    "README",
+				Content: []byte("This small file is in ZIP64 format.\n"),
+				Mtime:   "08-10-12 14:33:32",
+				Mode:    0644,
+			},
+		},
+	},
 }
 
 var crossPlatform = []ZipTestFile{
@@ -258,11 +288,12 @@ func readTestZip(t *testing.T, zt ZipTest) {
 		var rc *ReadCloser
 		rc, err = OpenReader(filepath.Join("testdata", zt.Name))
 		if err == nil {
+			defer rc.Close()
 			z = &rc.Reader
 		}
 	}
 	if err != zt.Error {
-		t.Errorf("error=%v, want %v", err, zt.Error)
+		t.Errorf("%s: error=%v, want %v", zt.Name, err, zt.Error)
 		return
 	}
 
@@ -324,17 +355,11 @@ func readTestFile(t *testing.T, zt ZipTest, ft ZipTestFile, f *File) {
 
 	testFileMode(t, zt.Name, f, ft.Mode)
 
-	size0 := f.UncompressedSize
-
 	var b bytes.Buffer
 	r, err := f.Open()
 	if err != nil {
-		t.Error(err)
+		t.Errorf("%s: %v", zt.Name, err)
 		return
-	}
-
-	if size1 := f.UncompressedSize; size0 != size1 {
-		t.Errorf("file %q changed f.UncompressedSize from %d to %d", f.Name, size0, size1)
 	}
 
 	_, err = io.Copy(&b, r)
@@ -345,6 +370,14 @@ func readTestFile(t *testing.T, zt ZipTest, ft ZipTestFile, f *File) {
 		return
 	}
 	r.Close()
+
+	size := uint64(f.UncompressedSize)
+	if size == uint32max {
+		size = f.UncompressedSize64
+	}
+	if g := uint64(b.Len()); g != size {
+		t.Errorf("%v: read %v bytes but f.UncompressedSize == %v", f.Name, g, size)
+	}
 
 	var c []byte
 	if ft.Content != nil {

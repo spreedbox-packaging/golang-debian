@@ -46,7 +46,8 @@ static vlong
 widstruct(Type *errtype, Type *t, vlong o, int flag)
 {
 	Type *f;
-	int32 w, maxalign;
+	int64 w;
+	int32 maxalign;
 	
 	maxalign = flag;
 	if(maxalign < 1)
@@ -118,7 +119,8 @@ dowidth(Type *t)
 	if(t->width == -2) {
 		lno = lineno;
 		lineno = t->lineno;
-		yyerror("invalid recursive type %T", t);
+		if(!t->broke)
+			yyerror("invalid recursive type %T", t);
 		t->width = 0;
 		lineno = lno;
 		return;
@@ -173,11 +175,11 @@ dowidth(Type *t)
 	case TFLOAT64:
 	case TCOMPLEX64:
 		w = 8;
-		t->align = widthptr;
+		t->align = widthreg;
 		break;
 	case TCOMPLEX128:
 		w = 16;
-		t->align = widthptr;
+		t->align = widthreg;
 		break;
 	case TPTR32:
 		w = 4;
@@ -218,7 +220,8 @@ dowidth(Type *t)
 		checkwidth(t->down);
 		break;
 	case TFORW:		// should have been filled in
-		yyerror("invalid recursive type %T", t);
+		if(!t->broke)
+			yyerror("invalid recursive type %T", t);
 		w = 1;	// anything will do
 		break;
 	case TANY:
@@ -285,10 +288,10 @@ dowidth(Type *t)
 		// compute their widths as side-effect.
 		t1 = t->type;
 		w = widstruct(t->type, *getthis(t1), 0, 0);
-		w = widstruct(t->type, *getinarg(t1), w, widthptr);
-		w = widstruct(t->type, *getoutarg(t1), w, widthptr);
+		w = widstruct(t->type, *getinarg(t1), w, widthreg);
+		w = widstruct(t->type, *getoutarg(t1), w, widthreg);
 		t1->argwid = w;
-		if(w%widthptr)
+		if(w%widthreg)
 			warn("bad type %T %d\n", t1, w);
 		t->align = 1;
 		break;
@@ -643,7 +646,7 @@ argsize(Type *t)
 {
 	Iter save;
 	Type *fp;
-	int w, x;
+	int64 w, x;
 
 	w = 0;
 
@@ -664,5 +667,7 @@ argsize(Type *t)
 	}
 
 	w = (w+widthptr-1) & ~(widthptr-1);
+	if((int)w != w)
+		fatal("argsize too big");
 	return w;
 }

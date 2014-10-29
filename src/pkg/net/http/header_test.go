@@ -6,6 +6,7 @@ package http
 
 import (
 	"bytes"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -178,7 +179,7 @@ var testHeader = Header{
 	"Content-Length": {"123"},
 	"Content-Type":   {"text/plain"},
 	"Date":           {"some date at some time Z"},
-	"Server":         {"Go http package"},
+	"Server":         {DefaultUserAgent},
 }
 
 var buf bytes.Buffer
@@ -191,14 +192,21 @@ func BenchmarkHeaderWriteSubset(b *testing.B) {
 	}
 }
 
-func TestHeaderWriteSubsetMallocs(t *testing.T) {
+func TestHeaderWriteSubsetAllocs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping alloc test in short mode")
+	}
+	if raceEnabled {
+		t.Skip("skipping test under race detector")
+	}
+	if runtime.GOMAXPROCS(0) > 1 {
+		t.Skip("skipping; GOMAXPROCS>1")
+	}
 	n := testing.AllocsPerRun(100, func() {
 		buf.Reset()
 		testHeader.WriteSubset(&buf, nil)
 	})
-	if n > 1 {
-		// TODO(bradfitz,rsc): once we can sort without allocating,
-		// make this an error.  See http://golang.org/issue/3761
-		// t.Errorf("got %v allocs, want <= %v", n, 1)
+	if n > 0 {
+		t.Errorf("allocs = %g; want 0", n)
 	}
 }

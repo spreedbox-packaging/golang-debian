@@ -9,12 +9,33 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"text/template"
 )
 
+// testEnv excludes GODEBUG from the environment
+// to prevent its output from breaking tests that
+// are trying to parse other command output.
+func testEnv(cmd *exec.Cmd) *exec.Cmd {
+	if cmd.Env != nil {
+		panic("environment already set")
+	}
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "GODEBUG=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, env)
+	}
+	return cmd
+}
+
 func executeTest(t *testing.T, templ string, data interface{}) string {
+	if runtime.GOOS == "nacl" {
+		t.Skip("skipping on nacl")
+	}
+
 	checkStaleRuntime(t)
 
 	st := template.Must(template.New("crashSource").Parse(templ))
@@ -28,30 +49,24 @@ func executeTest(t *testing.T, templ string, data interface{}) string {
 	src := filepath.Join(dir, "main.go")
 	f, err := os.Create(src)
 	if err != nil {
-		t.Fatalf("failed to create %v: %v", src, err)
+		t.Fatalf("failed to create file: %v", err)
 	}
 	err = st.Execute(f, data)
 	if err != nil {
 		f.Close()
 		t.Fatalf("failed to execute template: %v", err)
 	}
-	f.Close()
-
-	// Deadlock tests hang with GOMAXPROCS>1.  Issue 4826.
-	cmd := exec.Command("go", "run", src)
-	for _, s := range os.Environ() {
-		if strings.HasPrefix(s, "GOMAXPROCS") {
-			continue
-		}
-		cmd.Env = append(cmd.Env, s)
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close file: %v", err)
 	}
-	got, _ := cmd.CombinedOutput()
+
+	got, _ := testEnv(exec.Command("go", "run", src)).CombinedOutput()
 	return string(got)
 }
 
 func checkStaleRuntime(t *testing.T) {
 	// 'go run' uses the installed copy of runtime.a, which may be out of date.
-	out, err := exec.Command("go", "list", "-f", "{{.Stale}}", "runtime").CombinedOutput()
+	out, err := testEnv(exec.Command("go", "list", "-f", "{{.Stale}}", "runtime")).CombinedOutput()
 	if err != nil {
 		t.Fatalf("failed to execute 'go list': %v\n%v", err, string(out))
 	}
@@ -64,10 +79,10 @@ func testCrashHandler(t *testing.T, cgo bool) {
 	type crashTest struct {
 		Cgo bool
 	}
-	got := executeTest(t, crashSource, &crashTest{Cgo: cgo})
+	output := executeTest(t, crashSource, &crashTest{Cgo: cgo})
 	want := "main: recovered done\nnew-thread: recovered done\nsecond-new-thread: recovered done\nmain-again: recovered done\n"
-	if got != want {
-		t.Fatalf("expected %q, but got %q", want, got)
+	if output != want {
+		t.Fatalf("output:\n%s\n\nwanted:\n%s", output, want)
 	}
 }
 
@@ -76,10 +91,10 @@ func TestCrashHandler(t *testing.T) {
 }
 
 func testDeadlock(t *testing.T, source string) {
-	got := executeTest(t, source, nil)
+	output := executeTest(t, source, nil)
 	want := "fatal error: all goroutines are asleep - deadlock!\n"
-	if !strings.HasPrefix(got, want) {
-		t.Fatalf("expected %q, but got %q", want, got)
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
 	}
 }
 
@@ -99,11 +114,55 @@ func TestLockedDeadlock2(t *testing.T) {
 	testDeadlock(t, lockedDeadlockSource2)
 }
 
-func TestCgoSignalDeadlock(t *testing.T) {
-	got := executeTest(t, cgoSignalDeadlockSource, nil)
-	want := "OK\n"
-	if got != want {
-		t.Fatalf("expected %q, but got %q", want, got)
+func TestGoexitDeadlock(t *testing.T) {
+	output := executeTest(t, goexitDeadlockSource, nil)
+	want := "no goroutines (main called runtime.Goexit) - deadlock!"
+	if !strings.Contains(output, want) {
+		t.Fatalf("output:\n%s\n\nwant output containing: %s", output, want)
+	}
+}
+
+func TestStackOverflow(t *testing.T) {
+	output := executeTest(t, stackOverflowSource, nil)
+	want := "runtime: goroutine stack exceeds 4194304-byte limit\nfatal error: stack overflow"
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+
+func TestThreadExhaustion(t *testing.T) {
+	output := executeTest(t, threadExhaustionSource, nil)
+	want := "runtime: program exceeds 10-thread limit\nfatal error: thread exhaustion"
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+
+func TestRecursivePanic(t *testing.T) {
+	output := executeTest(t, recursivePanicSource, nil)
+	want := `wrap: bad
+panic: again
+
+`
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+
+}
+
+func TestGoexitCrash(t *testing.T) {
+	output := executeTest(t, goexitExitSource, nil)
+	want := "no goroutines (main called runtime.Goexit) - deadlock!"
+	if !strings.Contains(output, want) {
+		t.Fatalf("output:\n%s\n\nwant output containing: %s", output, want)
+	}
+}
+
+func TestGoNil(t *testing.T) {
+	output := executeTest(t, goNilSource, nil)
+	want := "go of nil func value"
+	if !strings.Contains(output, want) {
+		t.Fatalf("output:\n%s\n\nwant output containing: %s", output, want)
 	}
 }
 
@@ -192,67 +251,116 @@ func main() {
 }
 `
 
-const cgoSignalDeadlockSource = `
+const goexitDeadlockSource = `
+package main
+import (
+      "runtime"
+)
+
+func F() {
+      for i := 0; i < 10; i++ {
+      }
+}
+
+func main() {
+      go F()
+      go F()
+      runtime.Goexit()
+}
+`
+
+const stackOverflowSource = `
 package main
 
-import "C"
+import "runtime/debug"
+
+func main() {
+	debug.SetMaxStack(4<<20)
+	f(make([]byte, 10))
+}
+
+func f(x []byte) byte {
+	var buf [64<<10]byte
+	return x[0] + f(buf[:])
+}
+`
+
+const threadExhaustionSource = `
+package main
+
+import (
+	"runtime"
+	"runtime/debug"
+)
+
+func main() {
+	debug.SetMaxThreads(10)
+	c := make(chan int)
+	for i := 0; i < 100; i++ {
+		go func() {
+			runtime.LockOSThread()
+			c <- 0
+			select{}
+		}()
+		<-c
+	}
+}
+`
+
+const recursivePanicSource = `
+package main
 
 import (
 	"fmt"
+)
+
+func main() {
+	func() {
+		defer func() {
+			fmt.Println(recover())
+		}()
+		var x [8192]byte
+		func(x [8192]byte) {
+			defer func() {
+				if err := recover(); err != nil {
+					panic("wrap: " + err.(string))
+				}
+			}()
+			panic("bad")
+		}(x)
+	}()
+	panic("again")
+}
+`
+
+const goexitExitSource = `
+package main
+
+import (
 	"runtime"
 	"time"
 )
 
 func main() {
-	runtime.GOMAXPROCS(100)
-	ping := make(chan bool)
 	go func() {
-		for i := 0; ; i++ {
-			runtime.Gosched()
-			select {
-			case done := <-ping:
-				if done {
-					ping <- true
-					return
-				}
-				ping <- true
-			default:
-			}
-			func() {
-				defer func() {
-					recover()
-				}()
-				var s *string
-				*s = ""
-			}()
-		}
-	}()
-	time.Sleep(time.Millisecond)
-	for i := 0; i < 64; i++ {
-		go func() {
-			runtime.LockOSThread()
-			select {}
-		}()
-		go func() {
-			runtime.LockOSThread()
-			select {}
-		}()
 		time.Sleep(time.Millisecond)
-		ping <- false
-		select {
-		case <-ping:
-		case <-time.After(time.Second):
-			fmt.Printf("HANG\n")
-			return
-		}
-	}
-	ping <- true
-	select {
-	case <-ping:
-	case <-time.After(time.Second):
-		fmt.Printf("HANG\n")
-		return
-	}
-	fmt.Printf("OK\n")
+	}()
+	i := 0
+	runtime.SetFinalizer(&i, func(p *int) {})
+	runtime.GC()
+	runtime.Goexit()
+}
+`
+
+const goNilSource = `
+package main
+
+func main() {
+	defer func() {
+		recover()
+	}()
+	var f func()
+	go f()
+	select{}
 }
 `

@@ -14,6 +14,7 @@ import (
 	"io/ioutil"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,10 @@ type respTest struct {
 
 func dummyReq(method string) *Request {
 	return &Request{Method: method}
+}
+
+func dummyReq11(method string) *Request {
+	return &Request{Method: method, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1}
 }
 
 var respTests = []respTest{
@@ -112,8 +117,8 @@ var respTests = []respTest{
 			ProtoMinor: 0,
 			Request:    dummyReq("GET"),
 			Header: Header{
-				"Connection":     {"close"}, // TODO(rsc): Delete?
-				"Content-Length": {"10"},    // TODO(rsc): Delete?
+				"Connection":     {"close"},
+				"Content-Length": {"10"},
 			},
 			Close:         true,
 			ContentLength: 10,
@@ -157,7 +162,7 @@ var respTests = []respTest{
 			"Content-Length: 10\r\n" +
 			"\r\n" +
 			"0a\r\n" +
-			"Body here\n" +
+			"Body here\n\r\n" +
 			"0\r\n" +
 			"\r\n",
 
@@ -170,7 +175,7 @@ var respTests = []respTest{
 			Request:          dummyReq("GET"),
 			Header:           Header{},
 			Close:            false,
-			ContentLength:    -1, // TODO(rsc): Fix?
+			ContentLength:    -1,
 			TransferEncoding: []string{"chunked"},
 		},
 
@@ -324,16 +329,60 @@ var respTests = []respTest{
 
 		"",
 	},
+
+	// golang.org/issue/4767: don't special-case multipart/byteranges responses
+	{
+		`HTTP/1.1 206 Partial Content
+Connection: close
+Content-Type: multipart/byteranges; boundary=18a75608c8f47cef
+
+some body`,
+		Response{
+			Status:     "206 Partial Content",
+			StatusCode: 206,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Request:    dummyReq("GET"),
+			Header: Header{
+				"Content-Type": []string{"multipart/byteranges; boundary=18a75608c8f47cef"},
+			},
+			Close:         true,
+			ContentLength: -1,
+		},
+
+		"some body",
+	},
+
+	// Unchunked response without Content-Length, Request is nil
+	{
+		"HTTP/1.0 200 OK\r\n" +
+			"Connection: close\r\n" +
+			"\r\n" +
+			"Body here\n",
+
+		Response{
+			Status:     "200 OK",
+			StatusCode: 200,
+			Proto:      "HTTP/1.0",
+			ProtoMajor: 1,
+			ProtoMinor: 0,
+			Header: Header{
+				"Connection": {"close"}, // TODO(rsc): Delete?
+			},
+			Close:         true,
+			ContentLength: -1,
+		},
+
+		"Body here\n",
+	},
 }
 
 func TestReadResponse(t *testing.T) {
-	for i := range respTests {
-		tt := &respTests[i]
-		var braw bytes.Buffer
-		braw.WriteString(tt.Raw)
-		resp, err := ReadResponse(bufio.NewReader(&braw), tt.Resp.Request)
+	for i, tt := range respTests {
+		resp, err := ReadResponse(bufio.NewReader(strings.NewReader(tt.Raw)), tt.Resp.Request)
 		if err != nil {
-			t.Errorf("#%d: %s", i, err)
+			t.Errorf("#%d: %v", i, err)
 			continue
 		}
 		rbody := resp.Body
@@ -341,12 +390,31 @@ func TestReadResponse(t *testing.T) {
 		diff(t, fmt.Sprintf("#%d Response", i), resp, &tt.Resp)
 		var bout bytes.Buffer
 		if rbody != nil {
-			io.Copy(&bout, rbody)
+			_, err = io.Copy(&bout, rbody)
+			if err != nil {
+				t.Errorf("#%d: %v", i, err)
+				continue
+			}
 			rbody.Close()
 		}
 		body := bout.String()
 		if body != tt.Body {
 			t.Errorf("#%d: Body = %q want %q", i, body, tt.Body)
+		}
+	}
+}
+
+func TestWriteResponse(t *testing.T) {
+	for i, tt := range respTests {
+		resp, err := ReadResponse(bufio.NewReader(strings.NewReader(tt.Raw)), tt.Resp.Request)
+		if err != nil {
+			t.Errorf("#%d: %v", i, err)
+			continue
+		}
+		err = resp.Write(ioutil.Discard)
+		if err != nil {
+			t.Errorf("#%d: %v", i, err)
+			continue
 		}
 	}
 }
@@ -425,7 +493,7 @@ func TestReadResponseCloseInMiddle(t *testing.T) {
 		if test.compressed {
 			gzReader, err := gzip.NewReader(resp.Body)
 			checkErr(err, "gzip.NewReader")
-			resp.Body = &readFirstCloseBoth{gzReader, resp.Body}
+			resp.Body = &readerAndCloser{gzReader, resp.Body}
 		}
 
 		rbuf := make([]byte, 2500)
@@ -442,6 +510,9 @@ func TestReadResponseCloseInMiddle(t *testing.T) {
 		rest, err := ioutil.ReadAll(bufr)
 		checkErr(err, "ReadAll on remainder")
 		if e, g := "Next Request Here", string(rest); e != g {
+			g = regexp.MustCompile(`(xx+)`).ReplaceAllStringFunc(g, func(match string) string {
+				return fmt.Sprintf("x(repeated x%d)", len(match))
+			})
 			fatalf("remainder = %q, expected %q", g, e)
 		}
 	}
@@ -522,5 +593,53 @@ func TestResponseStatusStutter(t *testing.T) {
 	r.Write(&buf)
 	if strings.Contains(buf.String(), "123 123") {
 		t.Errorf("stutter in status: %s", buf.String())
+	}
+}
+
+func TestResponseContentLengthShortBody(t *testing.T) {
+	const shortBody = "Short body, not 123 bytes."
+	br := bufio.NewReader(strings.NewReader("HTTP/1.1 200 OK\r\n" +
+		"Content-Length: 123\r\n" +
+		"\r\n" +
+		shortBody))
+	res, err := ReadResponse(br, &Request{Method: "GET"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ContentLength != 123 {
+		t.Fatalf("Content-Length = %d; want 123", res.ContentLength)
+	}
+	var buf bytes.Buffer
+	n, err := io.Copy(&buf, res.Body)
+	if n != int64(len(shortBody)) {
+		t.Errorf("Copied %d bytes; want %d, len(%q)", n, len(shortBody), shortBody)
+	}
+	if buf.String() != shortBody {
+		t.Errorf("Read body %q; want %q", buf.String(), shortBody)
+	}
+	if err != io.ErrUnexpectedEOF {
+		t.Errorf("io.Copy error = %#v; want io.ErrUnexpectedEOF", err)
+	}
+}
+
+func TestReadResponseUnexpectedEOF(t *testing.T) {
+	br := bufio.NewReader(strings.NewReader("HTTP/1.1 301 Moved Permanently\r\n" +
+		"Location: http://example.com"))
+	_, err := ReadResponse(br, nil)
+	if err != io.ErrUnexpectedEOF {
+		t.Errorf("ReadResponse = %v; want io.ErrUnexpectedEOF", err)
+	}
+}
+
+func TestNeedsSniff(t *testing.T) {
+	// needsSniff returns true with an empty response.
+	r := &response{}
+	if got, want := r.needsSniff(), true; got != want {
+		t.Errorf("needsSniff = %t; want %t", got, want)
+	}
+	// needsSniff returns false when Content-Type = nil.
+	r.handlerHeader = Header{"Content-Type": nil}
+	if got, want := r.needsSniff(), false; got != want {
+		t.Errorf("needsSniff empty Content-Type = %t; want %t", got, want)
 	}
 }

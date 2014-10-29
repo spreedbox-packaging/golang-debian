@@ -45,6 +45,18 @@ func InstrumentMapLen3() {
 	_ = len(*m[0])
 }
 
+func TestRaceUnaddressableMapLen(t *testing.T) {
+	m := make(map[int]map[int]int)
+	ch := make(chan int, 1)
+	m[0] = make(map[int]int)
+	go func() {
+		_ = len(m[0])
+		ch <- 0
+	}()
+	m[0][0] = 1
+	<-ch
+}
+
 type Rect struct {
 	x, y int
 }
@@ -147,4 +159,36 @@ func noRaceReturn(c chan int) (a, b int) {
 		c <- 1
 	}()
 	return a, 10
+}
+
+func issue5431() {
+	var p **inltype
+	if inlinetest(p).x && inlinetest(p).y {
+	} else if inlinetest(p).x || inlinetest(p).y {
+	}
+}
+
+type inltype struct {
+	x, y bool
+}
+
+func inlinetest(p **inltype) *inltype {
+	return *p
+}
+
+type iface interface {
+	Foo() *struct{ b bool }
+}
+
+type Int int
+
+func (i Int) Foo() *struct{ b bool } {
+	return &struct{ b bool }{false}
+}
+
+func TestNoRaceForInfiniteLoop(t *testing.T) {
+	var x Int
+	// interface conversion causes nodes to be put on init list
+	for iface(x).Foo().b {
+	}
 }

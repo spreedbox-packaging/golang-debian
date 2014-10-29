@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../cmd/ld/textflag.h"
+
 // The method is based on a paper by Naoki Shibata: "Efficient evaluation
 // methods of elementary functions suitable for SIMD computation", Proc.
 // of International Supercomputing Conference 2010 (ISC'10), pp. 25 -- 32
@@ -31,7 +33,7 @@
 #define NegInf 0xFFF0000000000000
 
 // func Exp(x float64) float64
-TEXT ·Exp(SB),7,$0
+TEXT ·Exp(SB),NOSPLIT,$0
 // test bits for not-finite
 	MOVQ    x+0(FP), BX
 	MOVQ    $~(1<<63), AX // sign bit mask
@@ -93,7 +95,7 @@ TEXT ·Exp(SB),7,$0
 	SHLQ    CX, BX
 	MOVQ    BX, X1
 	MULSD   X1, X0
-	MOVSD   X0, r+8(FP)
+	MOVSD   X0, ret+8(FP)
 	RET
 notFinite:
 	// test bits for -Inf
@@ -103,10 +105,10 @@ notFinite:
 	// -Inf, return 0
 underflow: // return 0
 	MOVQ    $0, AX
-	MOVQ    AX, r+8(FP)
+	MOVQ    AX, ret+8(FP)
 	RET
 overflow: // return +Inf
 	MOVQ    $PosInf, BX
 notNegInf: // NaN or +Inf, return x
-	MOVQ    BX, r+8(FP)
+	MOVQ    BX, ret+8(FP)
 	RET

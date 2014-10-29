@@ -2,11 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../../cmd/ld/textflag.h"
+
 // func castagnoliSSE42(crc uint32, p []byte) uint32
-TEXT ·castagnoliSSE42(SB),7,$0
+TEXT ·castagnoliSSE42(SB),NOSPLIT,$0
 	MOVL crc+0(FP), AX  // CRC value
 	MOVQ p+8(FP), SI  // data pointer
-	MOVQ p+16(FP), CX  // len(p)
+	MOVQ p_len+16(FP), CX  // len(p)
 
 	NOTL AX
 
@@ -47,16 +49,16 @@ cleanup:
 
 done:
 	NOTL AX
-	MOVL AX, r+32(FP)
+	MOVL AX, ret+32(FP)
 	RET
 
 // func haveSSE42() bool
-TEXT ·haveSSE42(SB),7,$0
+TEXT ·haveSSE42(SB),NOSPLIT,$0
 	XORQ AX, AX
 	INCL AX
 	CPUID
 	SHRQ $20, CX
 	ANDQ $1, CX
-	MOVB CX, r+0(FP)
+	MOVB CX, ret+0(FP)
 	RET
 

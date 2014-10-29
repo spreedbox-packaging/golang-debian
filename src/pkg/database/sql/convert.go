@@ -19,9 +19,13 @@ var errNilPtr = errors.New("destination pointer is nil") // embedded in descript
 // driverArgs converts arguments from callers of Stmt.Exec and
 // Stmt.Query into driver Values.
 //
-// The statement si may be nil, if no statement is available.
-func driverArgs(si driver.Stmt, args []interface{}) ([]driver.Value, error) {
+// The statement ds may be nil, if no statement is available.
+func driverArgs(ds *driverStmt, args []interface{}) ([]driver.Value, error) {
 	dargs := make([]driver.Value, len(args))
+	var si driver.Stmt
+	if ds != nil {
+		si = ds.si
+	}
 	cc, ok := si.(driver.ColumnConverter)
 
 	// Normal path, for a driver.Stmt that is not a ColumnConverter.
@@ -60,7 +64,9 @@ func driverArgs(si driver.Stmt, args []interface{}) ([]driver.Value, error) {
 		// column before going across the network to get the
 		// same error.
 		var err error
+		ds.Lock()
 		dargs[n], err = cc.ColumnConverter(n).ConvertValue(arg)
+		ds.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("sql: converting argument #%d's type: %v", n, err)
 		}
@@ -106,11 +112,15 @@ func convertAssign(dest, src interface{}) error {
 			if d == nil {
 				return errNilPtr
 			}
-			bcopy := make([]byte, len(s))
-			copy(bcopy, s)
-			*d = bcopy
+			*d = cloneBytes(s)
 			return nil
 		case *[]byte:
+			if d == nil {
+				return errNilPtr
+			}
+			*d = cloneBytes(s)
+			return nil
+		case *RawBytes:
 			if d == nil {
 				return errNilPtr
 			}
@@ -119,7 +129,19 @@ func convertAssign(dest, src interface{}) error {
 		}
 	case nil:
 		switch d := dest.(type) {
+		case *interface{}:
+			if d == nil {
+				return errNilPtr
+			}
+			*d = nil
+			return nil
 		case *[]byte:
+			if d == nil {
+				return errNilPtr
+			}
+			*d = nil
+			return nil
+		case *RawBytes:
 			if d == nil {
 				return errNilPtr
 			}
@@ -138,7 +160,19 @@ func convertAssign(dest, src interface{}) error {
 			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 			reflect.Float32, reflect.Float64:
-			*d = fmt.Sprintf("%v", src)
+			*d = asString(src)
+			return nil
+		}
+	case *[]byte:
+		sv = reflect.ValueOf(src)
+		if b, ok := asBytes(nil, sv); ok {
+			*d = b
+			return nil
+		}
+	case *RawBytes:
+		sv = reflect.ValueOf(src)
+		if b, ok := asBytes([]byte(*d)[:0], sv); ok {
+			*d = RawBytes(b)
 			return nil
 		}
 	case *bool:
@@ -212,6 +246,16 @@ func convertAssign(dest, src interface{}) error {
 	return fmt.Errorf("unsupported driver -> Scan pair: %T -> %T", src, dest)
 }
 
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	} else {
+		c := make([]byte, len(b))
+		copy(c, b)
+		return c
+	}
+}
+
 func asString(src interface{}) string {
 	switch v := src.(type) {
 	case string:
@@ -219,5 +263,37 @@ func asString(src interface{}) string {
 	case []byte:
 		return string(v)
 	}
+	rv := reflect.ValueOf(src)
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(rv.Int(), 10)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(rv.Uint(), 10)
+	case reflect.Float64:
+		return strconv.FormatFloat(rv.Float(), 'g', -1, 64)
+	case reflect.Float32:
+		return strconv.FormatFloat(rv.Float(), 'g', -1, 32)
+	case reflect.Bool:
+		return strconv.FormatBool(rv.Bool())
+	}
 	return fmt.Sprintf("%v", src)
+}
+
+func asBytes(buf []byte, rv reflect.Value) (b []byte, ok bool) {
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.AppendInt(buf, rv.Int(), 10), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.AppendUint(buf, rv.Uint(), 10), true
+	case reflect.Float32:
+		return strconv.AppendFloat(buf, rv.Float(), 'g', -1, 32), true
+	case reflect.Float64:
+		return strconv.AppendFloat(buf, rv.Float(), 'g', -1, 64), true
+	case reflect.Bool:
+		return strconv.AppendBool(buf, rv.Bool()), true
+	case reflect.String:
+		s := rv.String()
+		return append(buf, s...), true
+	}
+	return
 }

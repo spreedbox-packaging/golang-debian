@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build freebsd linux
+// +build dragonfly freebsd linux
 
 #include "runtime.h"
+#include "stack.h"
+#include "../../cmd/ld/textflag.h"
 
 // This implementation depends on OS-specific implementations of
 //
@@ -41,7 +43,7 @@ runtime·lock(Lock *l)
 		runtime·throw("runtime·lock: lock count");
 
 	// Speculative grab for lock.
-	v = runtime·xchg(&l->key, MUTEX_LOCKED);
+	v = runtime·xchg((uint32*)&l->key, MUTEX_LOCKED);
 	if(v == MUTEX_UNLOCKED)
 		return;
 
@@ -64,7 +66,7 @@ runtime·lock(Lock *l)
 		// Try for lock, spinning.
 		for(i = 0; i < spin; i++) {
 			while(l->key == MUTEX_UNLOCKED)
-				if(runtime·cas(&l->key, MUTEX_UNLOCKED, wait))
+				if(runtime·cas((uint32*)&l->key, MUTEX_UNLOCKED, wait))
 					return;
 			runtime·procyield(ACTIVE_SPIN_CNT);
 		}
@@ -72,17 +74,17 @@ runtime·lock(Lock *l)
 		// Try for lock, rescheduling.
 		for(i=0; i < PASSIVE_SPIN; i++) {
 			while(l->key == MUTEX_UNLOCKED)
-				if(runtime·cas(&l->key, MUTEX_UNLOCKED, wait))
+				if(runtime·cas((uint32*)&l->key, MUTEX_UNLOCKED, wait))
 					return;
 			runtime·osyield();
 		}
 
 		// Sleep.
-		v = runtime·xchg(&l->key, MUTEX_SLEEPING);
+		v = runtime·xchg((uint32*)&l->key, MUTEX_SLEEPING);
 		if(v == MUTEX_UNLOCKED)
 			return;
 		wait = MUTEX_SLEEPING;
-		runtime·futexsleep(&l->key, MUTEX_SLEEPING, -1);
+		runtime·futexsleep((uint32*)&l->key, MUTEX_SLEEPING, -1);
 	}
 }
 
@@ -91,14 +93,16 @@ runtime·unlock(Lock *l)
 {
 	uint32 v;
 
-	if(--m->locks < 0)
-		runtime·throw("runtime·unlock: lock count");
-
-	v = runtime·xchg(&l->key, MUTEX_UNLOCKED);
+	v = runtime·xchg((uint32*)&l->key, MUTEX_UNLOCKED);
 	if(v == MUTEX_UNLOCKED)
 		runtime·throw("unlock of unlocked lock");
 	if(v == MUTEX_SLEEPING)
-		runtime·futexwakeup(&l->key, 1);
+		runtime·futexwakeup((uint32*)&l->key, 1);
+
+	if(--m->locks < 0)
+		runtime·throw("runtime·unlock: lock count");
+	if(m->locks == 0 && g->preempt)  // restore the preemption request in case we've cleared it in newstack
+		g->stackguard0 = StackPreempt;
 }
 
 // One-time notifications.
@@ -111,47 +115,87 @@ runtime·noteclear(Note *n)
 void
 runtime·notewakeup(Note *n)
 {
-	if(runtime·xchg(&n->key, 1))
+	uint32 old;
+
+	old = runtime·xchg((uint32*)&n->key, 1);
+	if(old != 0) {
+		runtime·printf("notewakeup - double wakeup (%d)\n", old);
 		runtime·throw("notewakeup - double wakeup");
-	runtime·futexwakeup(&n->key, 1);
+	}
+	runtime·futexwakeup((uint32*)&n->key, 1);
 }
 
 void
 runtime·notesleep(Note *n)
 {
-	if(m->profilehz > 0)
-		runtime·setprof(false);
-	while(runtime·atomicload(&n->key) == 0)
-		runtime·futexsleep(&n->key, 0, -1);
-	if(m->profilehz > 0)
-		runtime·setprof(true);
+	if(g != m->g0)
+		runtime·throw("notesleep not on g0");
+	while(runtime·atomicload((uint32*)&n->key) == 0) {
+		m->blocked = true;
+		runtime·futexsleep((uint32*)&n->key, 0, -1);
+		m->blocked = false;
+	}
 }
 
-void
-runtime·notetsleep(Note *n, int64 ns)
+#pragma textflag NOSPLIT
+static bool
+notetsleep(Note *n, int64 ns, int64 deadline, int64 now)
 {
-	int64 deadline, now;
+	// Conceptually, deadline and now are local variables.
+	// They are passed as arguments so that the space for them
+	// does not count against our nosplit stack sequence.
 
 	if(ns < 0) {
-		runtime·notesleep(n);
-		return;
+		while(runtime·atomicload((uint32*)&n->key) == 0) {
+			m->blocked = true;
+			runtime·futexsleep((uint32*)&n->key, 0, -1);
+			m->blocked = false;
+		}
+		return true;
 	}
 
-	if(runtime·atomicload(&n->key) != 0)
-		return;
+	if(runtime·atomicload((uint32*)&n->key) != 0)
+		return true;
 
-	if(m->profilehz > 0)
-		runtime·setprof(false);
 	deadline = runtime·nanotime() + ns;
 	for(;;) {
-		runtime·futexsleep(&n->key, 0, ns);
-		if(runtime·atomicload(&n->key) != 0)
+		m->blocked = true;
+		runtime·futexsleep((uint32*)&n->key, 0, ns);
+		m->blocked = false;
+		if(runtime·atomicload((uint32*)&n->key) != 0)
 			break;
 		now = runtime·nanotime();
 		if(now >= deadline)
 			break;
 		ns = deadline - now;
 	}
-	if(m->profilehz > 0)
-		runtime·setprof(true);
+	return runtime·atomicload((uint32*)&n->key) != 0;
+}
+
+bool
+runtime·notetsleep(Note *n, int64 ns)
+{
+	bool res;
+
+	if(g != m->g0 && !m->gcing)
+		runtime·throw("notetsleep not on g0");
+
+	res = notetsleep(n, ns, 0, 0);
+	return res;
+}
+
+// same as runtime·notetsleep, but called on user g (not g0)
+// calls only nosplit functions between entersyscallblock/exitsyscall
+bool
+runtime·notetsleepg(Note *n, int64 ns)
+{
+	bool res;
+
+	if(g == m->g0)
+		runtime·throw("notetsleepg on g0");
+
+	runtime·entersyscallblock();
+	res = notetsleep(n, ns, 0, 0);
+	runtime·exitsyscall();
+	return res;
 }

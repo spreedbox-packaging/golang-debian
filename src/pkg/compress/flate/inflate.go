@@ -54,7 +54,7 @@ func (e *WriteError) Error() string {
 	return "flate: write error at offset " + strconv.FormatInt(e.Offset, 10) + ": " + e.Err.Error()
 }
 
-// Note that much of the implemenation of huffmanDecoder is also copied
+// Note that much of the implementation of huffmanDecoder is also copied
 // into gen.go (in package main) for the purpose of precomputing the
 // fixed huffman tables so they can be included statically.
 
@@ -91,6 +91,10 @@ type huffmanDecoder struct {
 
 // Initialize Huffman decoding tables from array of code lengths.
 func (h *huffmanDecoder) init(bits []int) bool {
+	if h.min != 0 {
+		*h = huffmanDecoder{}
+	}
+
 	// Count number of codes of each length,
 	// compute min and max length.
 	var count [maxCodeLen]int
@@ -125,6 +129,9 @@ func (h *huffmanDecoder) init(bits []int) bool {
 		if i == huffmanChunkBits+1 {
 			// create link tables
 			link := code >> 1
+			if huffmanNumChunks < link {
+				return false
+			}
 			h.links = make([][]uint32, huffmanNumChunks-link)
 			for j := uint(link); j < huffmanNumChunks; j++ {
 				reverse := int(reverseByte[j>>8]) | int(reverseByte[j&0xff])<<8
@@ -154,7 +161,11 @@ func (h *huffmanDecoder) init(bits []int) bool {
 				h.chunks[off] = chunk
 			}
 		} else {
-			linktab := h.links[h.chunks[reverse&(huffmanNumChunks-1)]>>huffmanValueShift]
+			value := h.chunks[reverse&(huffmanNumChunks-1)] >> huffmanValueShift
+			if value >= uint32(len(h.links)) {
+				return false
+			}
+			linktab := h.links[value]
 			reverse >>= huffmanChunkBits
 			for off := reverse; off < numLinks; off += 1 << uint(n-huffmanChunkBits) {
 				linktab[off] = chunk
@@ -169,7 +180,7 @@ func (h *huffmanDecoder) init(bits []int) bool {
 // the NewReader will introduce its own buffering.
 type Reader interface {
 	io.Reader
-	ReadByte() (c byte, err error)
+	io.ByteReader
 }
 
 // Decompress state.
@@ -263,7 +274,6 @@ func (f *decompressor) Read(b []byte) (int, error) {
 		}
 		f.step(f)
 	}
-	panic("unreachable")
 }
 
 func (f *decompressor) Close() error {
@@ -495,7 +505,6 @@ func (f *decompressor) huffmanBlock() {
 			return
 		}
 	}
-	panic("unreached")
 }
 
 // copyHist copies f.copyLen bytes from f.hist (f.copyDist bytes ago) to itself.
@@ -513,7 +522,7 @@ func (f *decompressor) copyHist() bool {
 		if x := len(f.hist) - p; n > x {
 			n = x
 		}
-		forwardCopy(f.hist[f.hp:f.hp+n], f.hist[p:p+n])
+		forwardCopy(f.hist[:], f.hp, p, n)
 		p += n
 		f.hp += n
 		f.copyLen -= n
@@ -635,6 +644,10 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int, error) {
 		if n > huffmanChunkBits {
 			chunk = h.links[chunk>>huffmanValueShift][(f.b>>huffmanChunkBits)&h.linkMask]
 			n = uint(chunk & huffmanCountMask)
+			if n == 0 {
+				f.err = CorruptInputError(f.roffset)
+				return 0, f.err
+			}
 		}
 		if n <= f.nb {
 			f.b >>= n
@@ -642,7 +655,6 @@ func (f *decompressor) huffSym(h *huffmanDecoder) (int, error) {
 			return int(chunk >> huffmanValueShift), nil
 		}
 	}
-	return 0, CorruptInputError(f.roffset)
 }
 
 // Flush any buffered output to the underlying writer.

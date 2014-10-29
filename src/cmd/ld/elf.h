@@ -569,6 +569,8 @@ typedef struct {
 #define	R_ARM_GOT_PREL		96
 #define	R_ARM_GNU_VTENTRY	100
 #define	R_ARM_GNU_VTINHERIT	101
+#define	R_ARM_TLS_IE32		107
+#define	R_ARM_TLS_LE32		108
 #define	R_ARM_RSBREL32		250
 #define	R_ARM_THM_RPC22		251
 #define	R_ARM_RREL32		252
@@ -576,7 +578,7 @@ typedef struct {
 #define	R_ARM_RPC24		254
 #define	R_ARM_RBASE		255
 
-#define	R_ARM_COUNT		37	/* Count of defined relocation types. */
+#define	R_ARM_COUNT		38	/* Count of defined relocation types. */
 
 
 #define	R_386_NONE	0	/* No relocation. */
@@ -855,7 +857,8 @@ struct Elf64_Shdr {
 	Elf64_Xword	addralign;	/* Alignment in bytes. */
 	Elf64_Xword	entsize;	/* Size of each entry in section. */
 	
-	int	shnum; /* section number, not stored on disk */
+	int	shnum;  /* section number, not stored on disk */
+	LSym*	secsym; /* section symbol, if needed; not on disk */
 };
 
 /*
@@ -965,9 +968,9 @@ ElfPhdr	*newElfPhdr(void);
 uint32	elfwritehdr(void);
 uint32	elfwritephdrs(void);
 uint32	elfwriteshdrs(void);
-void	elfwritedynent(Sym*, int, uint64);
-void	elfwritedynentsym(Sym*, int, Sym*);
-void	elfwritedynentsymsize(Sym*, int, Sym*);
+void	elfwritedynent(LSym*, int, uint64);
+void	elfwritedynentsym(LSym*, int, LSym*);
+void	elfwritedynentsymsize(LSym*, int, LSym*);
 uint32	elfhash(uchar*);
 uint64	startelf(void);
 uint64	endelf(void);
@@ -991,13 +994,14 @@ ElfShdr* elfshalloc(Section*);
 ElfShdr* elfshname(char*);
 ElfShdr* elfshreloc(Section*);
 void	elfsetstring(char*, int);
-void	elfaddverneed(Sym*);
+void	elfaddverneed(LSym*);
 void	elfemitreloc(void);
-void	shsym(ElfShdr*, Sym*);
+void	shsym(ElfShdr*, LSym*);
 void	phsh(ElfPhdr*, ElfShdr*);
 void	doelf(void);
 void	elfsetupplt(void);
-void	dwarfaddshstrings(Sym*);
+void	dwarfaddshstrings(LSym*);
+void	dwarfaddelfsectionsyms(void);
 void	dwarfaddelfheaders(void);
 void	asmbelf(vlong symo);
 void	asmbelfsetup(void);
@@ -1005,7 +1009,10 @@ extern char linuxdynld[];
 extern char freebsddynld[];
 extern char netbsddynld[];
 extern char openbsddynld[];
-int	elfreloc1(Reloc*, vlong off, int32 elfsym, vlong add);
+extern char dragonflydynld[];
+extern char solarisdynld[];
+int	elfreloc1(Reloc*, vlong sectoff);
+void	putelfsectionsyms(void);
 
 EXTERN	int	elfstrsize;
 EXTERN	char*	elfstrdat;

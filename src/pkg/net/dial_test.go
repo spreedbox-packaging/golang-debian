@@ -5,13 +5,17 @@
 package net
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,12 +32,18 @@ func newLocalListener(t *testing.T) Listener {
 }
 
 func TestDialTimeout(t *testing.T) {
+	origBacklog := listenerBacklog
+	defer func() {
+		listenerBacklog = origBacklog
+	}()
+	listenerBacklog = 1
+
 	ln := newLocalListener(t)
 	defer ln.Close()
 
 	errc := make(chan error)
 
-	numConns := listenerBacklog + 10
+	numConns := listenerBacklog + 100
 
 	// TODO(bradfitz): It's hard to test this in a portable
 	// way. This is unfortunate, but works for now.
@@ -48,7 +58,7 @@ func TestDialTimeout(t *testing.T) {
 				errc <- err
 			}()
 		}
-	case "darwin", "windows":
+	case "darwin", "plan9", "windows":
 		// At least OS X 10.7 seems to accept any number of
 		// connections, ignoring listen's backlog, so resort
 		// to connecting to a hopefully-dead 127/8 address.
@@ -131,13 +141,13 @@ func TestSelfConnect(t *testing.T) {
 		n = 1000
 	}
 	switch runtime.GOOS {
-	case "darwin", "freebsd", "netbsd", "openbsd", "plan9", "windows":
+	case "darwin", "dragonfly", "freebsd", "netbsd", "openbsd", "plan9", "solaris", "windows":
 		// Non-Linux systems take a long time to figure
 		// out that there is nothing listening on localhost.
 		n = 100
 	}
 	for i := 0; i < n; i++ {
-		c, err := Dial("tcp", addr)
+		c, err := DialTimeout("tcp", addr, time.Millisecond)
 		if err == nil {
 			c.Close()
 			t.Errorf("#%d: Dial %q succeeded", i, addr)
@@ -308,6 +318,96 @@ func TestDialTimeoutFDLeak(t *testing.T) {
 	}
 }
 
+func numTCP() (ntcp, nopen, nclose int, err error) {
+	lsof, err := exec.Command("lsof", "-n", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	ntcp += bytes.Count(lsof, []byte("TCP"))
+	for _, state := range []string{"LISTEN", "SYN_SENT", "SYN_RECEIVED", "ESTABLISHED"} {
+		nopen += bytes.Count(lsof, []byte(state))
+	}
+	for _, state := range []string{"CLOSED", "CLOSE_WAIT", "LAST_ACK", "FIN_WAIT_1", "FIN_WAIT_2", "CLOSING", "TIME_WAIT"} {
+		nclose += bytes.Count(lsof, []byte(state))
+	}
+	return ntcp, nopen, nclose, nil
+}
+
+func TestDialMultiFDLeak(t *testing.T) {
+	if !supportsIPv4 || !supportsIPv6 {
+		t.Skip("neither ipv4 nor ipv6 is supported")
+	}
+
+	halfDeadServer := func(dss *dualStackServer, ln Listener) {
+		for {
+			if c, err := ln.Accept(); err != nil {
+				return
+			} else {
+				// It just keeps established
+				// connections like a half-dead server
+				// does.
+				dss.putConn(c)
+			}
+		}
+	}
+	dss, err := newDualStackServer([]streamListener{
+		{net: "tcp4", addr: "127.0.0.1"},
+		{net: "tcp6", addr: "[::1]"},
+	})
+	if err != nil {
+		t.Fatalf("newDualStackServer failed: %v", err)
+	}
+	defer dss.teardown()
+	if err := dss.buildup(halfDeadServer); err != nil {
+		t.Fatalf("dualStackServer.buildup failed: %v", err)
+	}
+
+	_, before, _, err := numTCP()
+	if err != nil {
+		t.Skipf("skipping test; error finding or running lsof: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	portnum, _, _ := dtoi(dss.port, 0)
+	ras := addrList{
+		// Losers that will fail to connect, see RFC 6890.
+		&TCPAddr{IP: IPv4(198, 18, 0, 254), Port: portnum},
+		&TCPAddr{IP: ParseIP("2001:2::254"), Port: portnum},
+
+		// Winner candidates of this race.
+		&TCPAddr{IP: IPv4(127, 0, 0, 1), Port: portnum},
+		&TCPAddr{IP: IPv6loopback, Port: portnum},
+
+		// Losers that will have established connections.
+		&TCPAddr{IP: IPv4(127, 0, 0, 1), Port: portnum},
+		&TCPAddr{IP: IPv6loopback, Port: portnum},
+	}
+	const T1 = 10 * time.Millisecond
+	const T2 = 2 * T1
+	const N = 10
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if c, err := dialMulti("tcp", "fast failover test", nil, ras, time.Now().Add(T1)); err == nil {
+				c.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	time.Sleep(T2)
+
+	ntcp, after, nclose, err := numTCP()
+	if err != nil {
+		t.Skipf("skipping test; error finding or running lsof: %v", err)
+	}
+	t.Logf("tcp sessions: %v, open sessions: %v, closing sessions: %v", ntcp, after, nclose)
+
+	if after != before {
+		t.Fatalf("got %v open sessions; expected %v", after, before)
+	}
+}
+
 func numFD() int {
 	if runtime.GOOS == "linux" {
 		f, err := os.Open("/proc/self/fd")
@@ -323,4 +423,114 @@ func numFD() int {
 	}
 	// All tests using this should be skipped anyway, but:
 	panic("numFDs not implemented on " + runtime.GOOS)
+}
+
+func TestDialer(t *testing.T) {
+	ln, err := Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer ln.Close()
+	ch := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			ch <- fmt.Errorf("Accept failed: %v", err)
+			return
+		}
+		defer c.Close()
+		ch <- nil
+	}()
+
+	laddr, err := ResolveTCPAddr("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ResolveTCPAddr failed: %v", err)
+	}
+	d := &Dialer{LocalAddr: laddr}
+	c, err := d.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer c.Close()
+	c.Read(make([]byte, 1))
+	err = <-ch
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func TestDialDualStackLocalhost(t *testing.T) {
+	if ips, err := LookupIP("localhost"); err != nil {
+		t.Fatalf("LookupIP failed: %v", err)
+	} else if len(ips) < 2 || !supportsIPv4 || !supportsIPv6 {
+		t.Skip("localhost doesn't have a pair of different address family IP addresses")
+	}
+
+	touchAndByeServer := func(dss *dualStackServer, ln Listener) {
+		for {
+			if c, err := ln.Accept(); err != nil {
+				return
+			} else {
+				c.Close()
+			}
+		}
+	}
+	dss, err := newDualStackServer([]streamListener{
+		{net: "tcp4", addr: "127.0.0.1"},
+		{net: "tcp6", addr: "[::1]"},
+	})
+	if err != nil {
+		t.Fatalf("newDualStackServer failed: %v", err)
+	}
+	defer dss.teardown()
+	if err := dss.buildup(touchAndByeServer); err != nil {
+		t.Fatalf("dualStackServer.buildup failed: %v", err)
+	}
+
+	d := &Dialer{DualStack: true}
+	for _ = range dss.lns {
+		if c, err := d.Dial("tcp", "localhost:"+dss.port); err != nil {
+			t.Errorf("Dial failed: %v", err)
+		} else {
+			if addr := c.LocalAddr().(*TCPAddr); addr.IP.To4() != nil {
+				dss.teardownNetwork("tcp4")
+			} else if addr.IP.To16() != nil && addr.IP.To4() == nil {
+				dss.teardownNetwork("tcp6")
+			}
+			c.Close()
+		}
+	}
+}
+
+func TestDialerKeepAlive(t *testing.T) {
+	ln := newLocalListener(t)
+	defer ln.Close()
+	defer func() {
+		testHookSetKeepAlive = func() {}
+	}()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	for _, keepAlive := range []bool{false, true} {
+		got := false
+		testHookSetKeepAlive = func() { got = true }
+		var d Dialer
+		if keepAlive {
+			d.KeepAlive = 30 * time.Second
+		}
+		c, err := d.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+		if got != keepAlive {
+			t.Errorf("Dialer.KeepAlive = %v: SetKeepAlive called = %v, want %v", d.KeepAlive, got, !got)
+		}
+	}
 }

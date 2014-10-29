@@ -17,6 +17,10 @@ static void useVFPv1(void);
 char *
 xgetgoarm(void)
 {
+#if defined(__FreeBSD__)
+	// FreeBSD has broken VFP support
+	return "5";
+#endif
 	if(xtryexecfunc(useVFPv3))
 		return "7";
 	else if(xtryexecfunc(useVFPv1))

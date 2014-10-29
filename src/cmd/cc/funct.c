@@ -235,7 +235,7 @@ no:
 	return 0;
 
 bad:
-	diag(n, "cant rewrite typestr for op %O\n", o);
+	diag(n, "can't rewrite typestr for op %O\n", o);
 	prtree(n, "isfunct");
 	n->type = T;
 	return 1;
@@ -269,7 +269,7 @@ dclfunct(Type *t, Sym *s)
 		goto bad;
 
 	f = alloc(sizeof(*f));
-	for(o=0; o<sizeof(f->sym); o++)
+	for(o=0; o<nelem(f->sym); o++)
 		f->sym[o] = S;
 
 	t->funct = f;

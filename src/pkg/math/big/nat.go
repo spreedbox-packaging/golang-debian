@@ -1021,8 +1021,6 @@ func trailingZeroBits(x Word) uint {
 	default:
 		panic("unknown word size")
 	}
-
-	return 0
 }
 
 // trailingZeroBits returns the number of consecutive least significant zero
@@ -1235,10 +1233,15 @@ func (z nat) expNN(x, y, m nat) nat {
 		z = nil
 	}
 
+	// x**y mod 1 == 0
+	if len(m) == 1 && m[0] == 1 {
+		return z.setWord(0)
+	}
+	// m == 0 || m > 1
+
+	// x**0 == 1
 	if len(y) == 0 {
-		z = z.make(1)
-		z[0] = 1
-		return z
+		return z.setWord(1)
 	}
 	// y > 0
 

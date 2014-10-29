@@ -93,6 +93,9 @@ func testKeyBasics(t *testing.T, priv *PrivateKey) {
 	if err := priv.Validate(); err != nil {
 		t.Errorf("Validate() failed: %s", err)
 	}
+	if priv.D.Cmp(priv.N) > 0 {
+		t.Errorf("private exponent too large")
+	}
 
 	pub := &priv.PublicKey
 	m := big.NewInt(42)
@@ -117,8 +120,10 @@ func testKeyBasics(t *testing.T, priv *PrivateKey) {
 }
 
 func fromBase10(base10 string) *big.Int {
-	i := new(big.Int)
-	i.SetString(base10, 10)
+	i, ok := new(big.Int).SetString(base10, 10)
+	if !ok {
+		panic("bad number: " + base10)
+	}
 	return i
 }
 
@@ -192,7 +197,7 @@ func TestEncryptOAEP(t *testing.T) {
 		public := PublicKey{n, test.e}
 
 		for j, message := range test.msgs {
-			randomSource := bytes.NewBuffer(message.seed)
+			randomSource := bytes.NewReader(message.seed)
 			out, err := EncryptOAEP(sha1, randomSource, &public, message.in, nil)
 			if err != nil {
 				t.Errorf("#%d,%d error: %s", i, j, err)

@@ -9,8 +9,11 @@ import (
 	"net/textproto"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
+
+var raceEnabled = false // set by race.go
 
 // A Header represents the key-value pairs in an HTTP header.
 type Header map[string][]string
@@ -103,21 +106,38 @@ type keyValues struct {
 	values []string
 }
 
-type byKey []keyValues
+// A headerSorter implements sort.Interface by sorting a []keyValues
+// by key. It's used as a pointer, so it can fit in a sort.Interface
+// interface value without allocation.
+type headerSorter struct {
+	kvs []keyValues
+}
 
-func (s byKey) Len() int           { return len(s) }
-func (s byKey) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
-func (s byKey) Less(i, j int) bool { return s[i].key < s[j].key }
+func (s *headerSorter) Len() int           { return len(s.kvs) }
+func (s *headerSorter) Swap(i, j int)      { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
+func (s *headerSorter) Less(i, j int) bool { return s.kvs[i].key < s.kvs[j].key }
 
-func (h Header) sortedKeyValues(exclude map[string]bool) []keyValues {
-	kvs := make([]keyValues, 0, len(h))
+var headerSorterPool = sync.Pool{
+	New: func() interface{} { return new(headerSorter) },
+}
+
+// sortedKeyValues returns h's keys sorted in the returned kvs
+// slice. The headerSorter used to sort is also returned, for possible
+// return to headerSorterCache.
+func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *headerSorter) {
+	hs = headerSorterPool.Get().(*headerSorter)
+	if cap(hs.kvs) < len(h) {
+		hs.kvs = make([]keyValues, 0, len(h))
+	}
+	kvs = hs.kvs[:0]
 	for k, vv := range h {
 		if !exclude[k] {
 			kvs = append(kvs, keyValues{k, vv})
 		}
 	}
-	sort.Sort(byKey(kvs))
-	return kvs
+	hs.kvs = kvs
+	sort.Sort(hs)
+	return kvs, hs
 }
 
 // WriteSubset writes a header in wire format.
@@ -127,7 +147,8 @@ func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
 	if !ok {
 		ws = stringWriter{w}
 	}
-	for _, kv := range h.sortedKeyValues(exclude) {
+	kvs, sorter := h.sortedKeyValues(exclude)
+	for _, kv := range kvs {
 		for _, v := range kv.values {
 			v = headerNewlineToSpace.Replace(v)
 			v = textproto.TrimString(v)
@@ -138,6 +159,7 @@ func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
 			}
 		}
 	}
+	headerSorterPool.Put(sorter)
 	return nil
 }
 
@@ -148,7 +170,7 @@ func (h Header) WriteSubset(w io.Writer, exclude map[string]bool) error {
 // canonical key for "accept-encoding" is "Accept-Encoding".
 func CanonicalHeaderKey(s string) string { return textproto.CanonicalMIMEHeaderKey(s) }
 
-// hasToken returns whether token appears with v, ASCII
+// hasToken reports whether token appears with v, ASCII
 // case-insensitive, with space or comma boundaries.
 // token must be all lowercase.
 // v may contain mixed cased.

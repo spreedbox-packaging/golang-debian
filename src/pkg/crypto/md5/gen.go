@@ -160,7 +160,13 @@ var data = Data{
 	},
 }
 
-var program = `
+var program = `// Copyright 2013 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// DO NOT EDIT.
+// Generate with: go run gen.go{{if .Full}} -full{{end}} | gofmt >md5block.go
+
 package md5
 
 import (
@@ -186,7 +192,17 @@ import (
 	}
 {{end}}
 
-func block(dig *digest, p []byte) {
+const x86 = runtime.GOARCH == "amd64" || runtime.GOARCH == "386"
+
+var littleEndian bool
+
+func init() {
+	x := uint32(0x04030201)
+	y := [4]byte{0x1, 0x2, 0x3, 0x4}
+	littleEndian = *(*[4]byte)(unsafe.Pointer(&x)) == y
+}
+
+func blockGeneric(dig *digest, p []byte) {
 	a := dig.s[0]
 	b := dig.s[1]
 	c := dig.s[2]
@@ -197,13 +213,13 @@ func block(dig *digest, p []byte) {
 		aa, bb, cc, dd := a, b, c, d
 
 		// This is a constant condition - it is not evaluated on each iteration.
-		if runtime.GOARCH == "amd64" || runtime.GOARCH == "386" {
+		if x86 {
 			// MD5 was designed so that x86 processors can just iterate
 			// over the block data directly as uint32s, and we generate
 			// less code and run 1.3x faster if we take advantage of that.
 			// My apologies.
 			X = (*[16]uint32)(unsafe.Pointer(&p[0]))
-		} else if uintptr(unsafe.Pointer(&p[0]))&(unsafe.Alignof(uint32(0))-1) == 0 {
+		} else if littleEndian && uintptr(unsafe.Pointer(&p[0]))&(unsafe.Alignof(uint32(0))-1) == 0 {
 			X = (*[16]uint32)(unsafe.Pointer(&p[0]))
 		} else {
 			X = &xbuf

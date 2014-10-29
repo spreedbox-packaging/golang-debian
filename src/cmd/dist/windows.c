@@ -271,6 +271,8 @@ static void bgwait1(void);
 static void
 genrun(Buf *b, char *dir, int mode, Vec *argv, int wait)
 {
+	// Another copy of this logic is in ../../lib9/run_windows.c.
+	// If there's a bug here, fix the logic there too.
 	int i, j, nslash;
 	Buf cmd;
 	char *q;
@@ -463,7 +465,7 @@ xrealwd(Buf *b, char *path)
 	torune(&rnew, path);
 	if(!SetCurrentDirectoryW(rnew))
 		fatal("chdir %s: %s", path, errstr());
-	free(rnew);
+	xfree(rnew);
 	xgetwd(b);
 	if(!SetCurrentDirectoryW(old)) {
 		breset(b);
@@ -838,34 +840,20 @@ void
 xprintf(char *fmt, ...)
 {
 	va_list arg;
-	char *p;
-	DWORD n, w;
-
+	
 	va_start(arg, fmt);
-	n = vsnprintf(NULL, 0, fmt, arg);
-	p = xmalloc(n+1);
-	vsnprintf(p, n+1, fmt, arg);
+	vprintf(fmt, arg);
 	va_end(arg);
-	w = 0;
-	WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), p, n, &w, 0);
-	xfree(p);
 }
 
 void
 errprintf(char *fmt, ...)
 {
 	va_list arg;
-	char *p;
-	DWORD n, w;
-
+	
 	va_start(arg, fmt);
-	n = vsnprintf(NULL, 0, fmt, arg);
-	p = xmalloc(n+1);
-	vsnprintf(p, n+1, fmt, arg);
+	vfprintf(stderr, fmt, arg);
 	va_end(arg);
-	w = 0;
-	WriteFile(GetStdHandle(STD_ERROR_HANDLE), p, n, &w, 0);
-	xfree(p);
 }
 
 int
@@ -927,7 +915,7 @@ xstrrchr(char *p, int c)
 	return nil;
 }
 
-// xsamefile returns whether f1 and f2 are the same file (or dir)
+// xsamefile reports whether f1 and f2 are the same file (or dir)
 int
 xsamefile(char *f1, char *f2)
 {

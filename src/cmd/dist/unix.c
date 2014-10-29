@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <setjmp.h>
+#include <signal.h>
 
 // bprintf replaces the buffer with the result of the printf formatting
 // and returns a pointer to the NUL-terminated buffer contents.
@@ -466,9 +467,12 @@ xworkdir(void)
 	xgetenv(&b, "TMPDIR");
 	if(b.len == 0)
 		bwritestr(&b, "/var/tmp");
-	bwritestr(&b, "/go-cbuild-XXXXXX");
-	if(mkdtemp(bstr(&b)) == nil)
-		fatal("mkdtemp: %s", strerror(errno));
+	if(b.p[b.len-1] != '/')
+		bwrite(&b, "/", 1);
+	bwritestr(&b, "go-cbuild-XXXXXX");
+	p = bstr(&b);
+	if(mkdtemp(p) == nil)
+		fatal("mkdtemp(%s): %s", p, strerror(errno));
 	p = btake(&b);
 
 	bfree(&b);
@@ -548,7 +552,7 @@ hassuffix(char *p, char *suffix)
 	return np >= ns && strcmp(p+np-ns, suffix) == 0;
 }
 
-// hasprefix reports whether p begins wtih prefix.
+// hasprefix reports whether p begins with prefix.
 bool
 hasprefix(char *p, char *prefix)
 {
@@ -651,10 +655,13 @@ int
 main(int argc, char **argv)
 {
 	Buf b;
+	int osx;
 	struct utsname u;
 
 	setvbuf(stdout, nil, _IOLBF, 0);
 	setvbuf(stderr, nil, _IOLBF, 0);
+
+	setenv("TERM", "dumb", 1); // disable escape codes in clang errors
 
 	binit(&b);
 	
@@ -668,6 +675,8 @@ main(int argc, char **argv)
 		gohostarch = "amd64";
 #elif defined(__linux__)
 	gohostos = "linux";
+#elif defined(__DragonFly__)
+	gohostos = "dragonfly";
 #elif defined(__FreeBSD__)
 	gohostos = "freebsd";
 #elif defined(__FreeBSD_kernel__)
@@ -678,6 +687,14 @@ main(int argc, char **argv)
 	gohostos = "openbsd";
 #elif defined(__NetBSD__)
 	gohostos = "netbsd";
+#elif defined(__sun) && defined(__SVR4)
+	gohostos = "solaris";
+	// Even on 64-bit platform, solaris uname -m prints i86pc.
+	run(&b, nil, 0, "isainfo", "-n", nil);
+	if(contains(bstr(&b), "amd64"))
+		gohostarch = "amd64";
+	if(contains(bstr(&b), "i386"))
+		gohostarch = "386";
 #else
 	fatal("unknown operating system");
 #endif
@@ -697,6 +714,25 @@ main(int argc, char **argv)
 
 	if(strcmp(gohostarch, "arm") == 0)
 		maxnbg = 1;
+
+	// The OS X 10.6 linker does not support external linking mode.
+	// See golang.org/issue/5130.
+	//
+	// OS X 10.6 does not work with clang either, but OS X 10.9 requires it.
+	// It seems to work with OS X 10.8, so we default to clang for 10.8 and later.
+	// See golang.org/issue/5822.
+	//
+	// Roughly, OS X 10.N shows up as uname release (N+4),
+	// so OS X 10.6 is uname version 10 and OS X 10.8 is uname version 12.
+	if(strcmp(gohostos, "darwin") == 0) {
+		if(uname(&u) < 0)
+			fatal("uname: %s", strerror(errno));
+		osx = atoi(u.release) - 4;
+		if(osx <= 6)
+			goextlinkenabled = "0";
+		if(osx >= 8)
+			defaultclang = 1;
+	}
 
 	init();
 	xmain(argc, argv);
@@ -732,7 +768,7 @@ xstrrchr(char *p, int c)
 	return strrchr(p, c);
 }
 
-// xsamefile returns whether f1 and f2 are the same file (or dir)
+// xsamefile reports whether f1 and f2 are the same file (or dir)
 int
 xsamefile(char *f1, char *f2)
 {
@@ -745,17 +781,24 @@ static void sigillhand(int);
 // xtryexecfunc tries to execute function f, if any illegal instruction
 // signal received in the course of executing that function, it will
 // return 0, otherwise it will return 1.
+// Some systems (notably NetBSD) will spin and spin when executing VFPv3
+// instructions on VFPv2 system (e.g. Raspberry Pi) without ever triggering
+// SIGILL, so we set a 1-second alarm to catch that case.
 int
 xtryexecfunc(void (*f)(void))
 {
 	int r;
 	r = 0;
 	signal(SIGILL, sigillhand);
+	signal(SIGALRM, sigillhand);
+	alarm(1);
 	if(sigsetjmp(sigill_jmpbuf, 1) == 0) {
 		f();
 		r = 1;
 	}
 	signal(SIGILL, SIG_DFL);
+	alarm(0);
+	signal(SIGALRM, SIG_DFL);
 	return r;
 }
 

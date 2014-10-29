@@ -25,6 +25,32 @@ func loopbackInterface() *Interface {
 	return nil
 }
 
+// ipv6LinkLocalUnicastAddr returns an IPv6 link-local unicast address
+// on the given network interface for tests. It returns "" if no
+// suitable address is found.
+func ipv6LinkLocalUnicastAddr(ifi *Interface) string {
+	if ifi == nil {
+		return ""
+	}
+	ifat, err := ifi.Addrs()
+	if err != nil {
+		return ""
+	}
+	for _, ifa := range ifat {
+		switch ifa := ifa.(type) {
+		case *IPAddr:
+			if ifa.IP.To4() == nil && ifa.IP.IsLinkLocalUnicast() {
+				return ifa.IP.String()
+			}
+		case *IPNet:
+			if ifa.IP.To4() == nil && ifa.IP.IsLinkLocalUnicast() {
+				return ifa.IP.String()
+			}
+		}
+	}
+	return ""
+}
+
 func TestInterfaces(t *testing.T) {
 	ift, err := Interfaces()
 	if err != nil {
@@ -81,12 +107,23 @@ func testInterfaceMulticastAddrs(t *testing.T, ifi *Interface) {
 
 func testAddrs(t *testing.T, ifat []Addr) {
 	for _, ifa := range ifat {
-		switch v := ifa.(type) {
-		case *IPAddr, *IPNet:
-			if v == nil {
-				t.Errorf("\tunexpected value: %v", ifa)
+		switch ifa := ifa.(type) {
+		case *IPAddr:
+			if ifa == nil || ifa.IP == nil {
+				t.Errorf("\tunexpected value: %v, %v", ifa, ifa.IP)
 			} else {
 				t.Logf("\tinterface address %q", ifa.String())
+			}
+		case *IPNet:
+			if ifa == nil || ifa.IP == nil || ifa.Mask == nil {
+				t.Errorf("\tunexpected value: %v, %v, %v", ifa, ifa.IP, ifa.Mask)
+			} else {
+				_, prefixLen := ifa.Mask.Size()
+				if ifa.IP.To4() != nil && prefixLen != 8*IPv4len || ifa.IP.To16() != nil && ifa.IP.To4() == nil && prefixLen != 8*IPv6len {
+					t.Errorf("\tunexpected value: %v, %v, %v, %v", ifa, ifa.IP, ifa.Mask, prefixLen)
+				} else {
+					t.Logf("\tinterface address %q", ifa.String())
+				}
 			}
 		default:
 			t.Errorf("\tunexpected type: %T", ifa)
@@ -96,9 +133,9 @@ func testAddrs(t *testing.T, ifat []Addr) {
 
 func testMulticastAddrs(t *testing.T, ifmat []Addr) {
 	for _, ifma := range ifmat {
-		switch v := ifma.(type) {
+		switch ifma := ifma.(type) {
 		case *IPAddr:
-			if v == nil {
+			if ifma == nil {
 				t.Errorf("\tunexpected value: %v", ifma)
 			} else {
 				t.Logf("\tjoined group address %q", ifma.String())

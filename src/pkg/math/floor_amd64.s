@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../cmd/ld/textflag.h"
+
 #define Big		0x4330000000000000 // 2**52
 
 // func Floor(x float64) float64
-TEXT ·Floor(SB),7,$0
+TEXT ·Floor(SB),NOSPLIT,$0
 	MOVQ	x+0(FP), AX
 	MOVQ	$~(1<<63), DX // sign bit mask
 	ANDQ	AX,DX // DX = |x|
@@ -20,14 +22,14 @@ TEXT ·Floor(SB),7,$0
 	MOVSD	$(-1.0), X2
 	ANDPD	X2, X0 // if x < float(int(x)) {X0 = -1} else {X0 = 0}
 	ADDSD	X1, X0
-	MOVSD	X0, r+8(FP)
+	MOVSD	X0, ret+8(FP)
 	RET
 isBig_floor:
-	MOVQ    AX, r+8(FP) // return x
+	MOVQ    AX, ret+8(FP) // return x
 	RET
 
 // func Ceil(x float64) float64
-TEXT ·Ceil(SB),7,$0
+TEXT ·Ceil(SB),NOSPLIT,$0
 	MOVQ	x+0(FP), AX
 	MOVQ	$~(1<<63), DX // sign bit mask
 	MOVQ	AX, BX // BX = copy of x
@@ -46,14 +48,14 @@ TEXT ·Ceil(SB),7,$0
 	ANDNPD	X3, X0
 	ORPD	X2, X0 // if float(int(x)) <= x {X0 = 1} else {X0 = -0}
 	ADDSD	X1, X0
-	MOVSD	X0, r+8(FP)
+	MOVSD	X0, ret+8(FP)
 	RET
 isBig_ceil:
-	MOVQ	AX, r+8(FP)
+	MOVQ	AX, ret+8(FP)
 	RET
 
 // func Trunc(x float64) float64
-TEXT ·Trunc(SB),7,$0
+TEXT ·Trunc(SB),NOSPLIT,$0
 	MOVQ	x+0(FP), AX
 	MOVQ	$~(1<<63), DX // sign bit mask
 	MOVQ	AX, BX // BX = copy of x
@@ -67,8 +69,8 @@ TEXT ·Trunc(SB),7,$0
 	ANDNPD	X0, X2 // X2 = sign
 	CVTSQ2SD	AX, X0 // X0 = float(int(x))
 	ORPD	X2, X0 // if X0 = 0.0, incorporate sign
-	MOVSD	X0, r+8(FP)
+	MOVSD	X0, ret+8(FP)
 	RET
 isBig_trunc:
-	MOVQ    AX, r+8(FP) // return x
+	MOVQ    AX, ret+8(FP) // return x
 	RET

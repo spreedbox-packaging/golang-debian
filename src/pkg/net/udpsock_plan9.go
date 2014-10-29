@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// UDP sockets for Plan 9
-
 package net
 
 import (
@@ -13,15 +11,13 @@ import (
 	"time"
 )
 
-// UDPConn is the implementation of the Conn and PacketConn
-// interfaces for UDP network connections.
+// UDPConn is the implementation of the Conn and PacketConn interfaces
+// for UDP network connections.
 type UDPConn struct {
 	conn
 }
 
-func newUDPConn(fd *netFD) *UDPConn {
-	return &UDPConn{conn{fd}}
-}
+func newUDPConn(fd *netFD) *UDPConn { return &UDPConn{conn{fd}} }
 
 // ReadFromUDP reads a UDP packet from c, copying the payload into b.
 // It returns the number of bytes copied into b and the return address
@@ -58,7 +54,7 @@ func (c *UDPConn) ReadFrom(b []byte) (int, Addr, error) {
 }
 
 // ReadMsgUDP reads a packet from c, copying the payload into b and
-// the associdated out-of-band data into oob.  It returns the number
+// the associated out-of-band data into oob.  It returns the number
 // of bytes copied into b, the number of bytes copied into oob, the
 // flags that were set on the packet and the source address of the
 // packet.
@@ -76,6 +72,9 @@ func (c *UDPConn) ReadMsgUDP(b, oob []byte) (n, oobn, flags int, addr *UDPAddr, 
 func (c *UDPConn) WriteToUDP(b []byte, addr *UDPAddr) (int, error) {
 	if !c.ok() || c.fd.data == nil {
 		return 0, syscall.EINVAL
+	}
+	if addr == nil {
+		return 0, &OpError{Op: "write", Net: c.fd.dir, Addr: nil, Err: errMissingAddress}
 	}
 	h := new(udpHeader)
 	h.raddr = addr.IP.To16()
@@ -164,7 +163,10 @@ func unmarshalUDPHeader(b []byte) (*udpHeader, []byte) {
 }
 
 // ListenUDP listens for incoming UDP packets addressed to the local
-// address laddr.  The returned connection c's ReadFrom and WriteTo
+// address laddr.  Net must be "udp", "udp4", or "udp6".  If laddr has
+// a port of 0, ListenUDP will choose an available port.
+// The LocalAddr method of the returned UDPConn can be used to
+// discover the port.  The returned connection's ReadFrom and WriteTo
 // methods can be used to receive and send UDP packets with per-packet
 // addressing.
 func ListenUDP(net string, laddr *UDPAddr) (*UDPConn, error) {
@@ -188,7 +190,8 @@ func ListenUDP(net string, laddr *UDPAddr) (*UDPConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newUDPConn(l.netFD()), nil
+	fd, err := l.netFD()
+	return newUDPConn(fd), err
 }
 
 // ListenMulticastUDP listens for incoming multicast UDP packets

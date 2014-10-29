@@ -7,6 +7,8 @@ package big
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"math"
 	"strconv"
@@ -407,6 +409,95 @@ func TestRatGobEncoding(t *testing.T) {
 	}
 }
 
+// Sending a nil Rat pointer (inside a slice) on a round trip through gob should yield a zero.
+// TODO: top-level nils.
+func TestGobEncodingNilRatInSlice(t *testing.T) {
+	buf := new(bytes.Buffer)
+	enc := gob.NewEncoder(buf)
+	dec := gob.NewDecoder(buf)
+
+	var in = make([]*Rat, 1)
+	err := enc.Encode(&in)
+	if err != nil {
+		t.Errorf("gob encode failed: %q", err)
+	}
+	var out []*Rat
+	err = dec.Decode(&out)
+	if err != nil {
+		t.Fatalf("gob decode failed: %q", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("wrong len; want 1 got %d", len(out))
+	}
+	var zero Rat
+	if out[0].Cmp(&zero) != 0 {
+		t.Errorf("transmission of (*Int)(nill) failed: got %s want 0", out)
+	}
+}
+
+var ratNums = []string{
+	"-141592653589793238462643383279502884197169399375105820974944592307816406286",
+	"-1415926535897932384626433832795028841971",
+	"-141592653589793",
+	"-1",
+	"0",
+	"1",
+	"141592653589793",
+	"1415926535897932384626433832795028841971",
+	"141592653589793238462643383279502884197169399375105820974944592307816406286",
+}
+
+var ratDenoms = []string{
+	"1",
+	"718281828459045",
+	"7182818284590452353602874713526624977572",
+	"718281828459045235360287471352662497757247093699959574966967627724076630353",
+}
+
+func TestRatJSONEncoding(t *testing.T) {
+	for _, num := range ratNums {
+		for _, denom := range ratDenoms {
+			var tx Rat
+			tx.SetString(num + "/" + denom)
+			b, err := json.Marshal(&tx)
+			if err != nil {
+				t.Errorf("marshaling of %s failed: %s", &tx, err)
+				continue
+			}
+			var rx Rat
+			if err := json.Unmarshal(b, &rx); err != nil {
+				t.Errorf("unmarshaling of %s failed: %s", &tx, err)
+				continue
+			}
+			if rx.Cmp(&tx) != 0 {
+				t.Errorf("JSON encoding of %s failed: got %s want %s", &tx, &rx, &tx)
+			}
+		}
+	}
+}
+
+func TestRatXMLEncoding(t *testing.T) {
+	for _, num := range ratNums {
+		for _, denom := range ratDenoms {
+			var tx Rat
+			tx.SetString(num + "/" + denom)
+			b, err := xml.Marshal(&tx)
+			if err != nil {
+				t.Errorf("marshaling of %s failed: %s", &tx, err)
+				continue
+			}
+			var rx Rat
+			if err := xml.Unmarshal(b, &rx); err != nil {
+				t.Errorf("unmarshaling of %s failed: %s", &tx, err)
+				continue
+			}
+			if rx.Cmp(&tx) != 0 {
+				t.Errorf("XML encoding of %s failed: got %s want %s", &tx, &rx, &tx)
+			}
+		}
+	}
+}
+
 func TestIssue2379(t *testing.T) {
 	// 1) no aliasing
 	q := NewRat(3, 2)
@@ -503,9 +594,7 @@ func TestIssue3521(t *testing.T) {
 // Test inputs to Rat.SetString.  The prefix "long:" causes the test
 // to be skipped in --test.short mode.  (The threshold is about 500us.)
 var float64inputs = []string{
-	//
 	// Constants plundered from strconv/testfp.txt.
-	//
 
 	// Table 1: Stress Inputs for Conversion to 53-bit Binary, < 1/2 ULP
 	"5e+125",
@@ -583,9 +672,7 @@ var float64inputs = []string{
 	"75224575729e-45",
 	"459926601011e+15",
 
-	//
 	// Constants plundered from strconv/atof_test.go.
-	//
 
 	"0",
 	"1",
@@ -734,7 +821,7 @@ func TestFloat64SpecialCases(t *testing.T) {
 			case f == 0 && r.Num().BitLen() == 0:
 				// Ok: Rat(0) is equivalent to both +/- float64(0).
 			default:
-				t.Errorf("strconv.ParseFloat(%q) = %g (%b), want %g (%b); delta=%g", input, e, e, f, f, f-e)
+				t.Errorf("strconv.ParseFloat(%q) = %g (%b), want %g (%b); delta = %g", input, e, e, f, f, f-e)
 			}
 		}
 
@@ -753,7 +840,7 @@ func TestFloat64SpecialCases(t *testing.T) {
 
 		// 4. Check exactness using slow algorithm.
 		if wasExact := new(Rat).SetFloat64(f).Cmp(r) == 0; wasExact != exact {
-			t.Errorf("Rat.SetString(%q).Float64().exact = %b, want %b", input, exact, wasExact)
+			t.Errorf("Rat.SetString(%q).Float64().exact = %t, want %t", input, exact, wasExact)
 		}
 	}
 }
@@ -795,7 +882,7 @@ func TestFloat64Distribution(t *testing.T) {
 
 					if !checkIsBestApprox(t, f, r) {
 						// Append context information.
-						t.Errorf("(input was mantissa %#x, exp %d; f=%g (%b); f~%g; r=%v)",
+						t.Errorf("(input was mantissa %#x, exp %d; f = %g (%b); f ~ %g; r = %v)",
 							b, exp, f, f, math.Ldexp(float64(b), exp), r)
 					}
 
@@ -830,7 +917,7 @@ func checkNonLossyRoundtrip(t *testing.T, f float64) {
 	}
 	f2, exact := r.Float64()
 	if f != f2 || !exact {
-		t.Errorf("Rat.SetFloat64(%g).Float64() = %g (%b), %v, want %g (%b), %v; delta=%b",
+		t.Errorf("Rat.SetFloat64(%g).Float64() = %g (%b), %v, want %g (%b), %v; delta = %b",
 			f, f2, f2, exact, f, f, true, f2-f)
 	}
 }

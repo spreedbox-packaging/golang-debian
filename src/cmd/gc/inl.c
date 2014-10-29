@@ -146,6 +146,7 @@ caninl(Node *fn)
 
 	fn->nname->inl = fn->nbody;
 	fn->nbody = inlcopylist(fn->nname->inl);
+	fn->nname->inldcl = inlcopylist(fn->nname->defn->dcl);
 
 	// hack, TODO, check for better way to link method nodes back to the thing with the ->inl
 	// this is so export can find the body of a method
@@ -188,6 +189,7 @@ ishairy(Node *n, int *budget)
 		break;
 
 	case OCLOSURE:
+	case OCALLPART:
 	case ORANGE:
 	case OFOR:
 	case OSELECT:
@@ -196,6 +198,7 @@ ishairy(Node *n, int *budget)
 	case ODEFER:
 	case ODCLTYPE:  // can't print yet
 	case ODCLCONST:  // can't print yet
+	case ORETJMP:
 		return 1;
 
 		break;
@@ -357,7 +360,7 @@ inlnode(Node **np)
 		}
 
 	case OCLOSURE:
-		// TODO do them here (or earlier) instead of in walkcallclosure,
+		// TODO do them here (or earlier),
 		// so escape analysis can avoid more heapmoves.
 		return;
 	}
@@ -389,6 +392,8 @@ inlnode(Node **np)
 	case OCALLFUNC:
 	case OCALLMETH:
 	case OCALLINTER:
+	case OAPPEND:
+	case OCOMPLEX:
 		// if we just replaced arg in f(arg()) or return arg with an inlined call
 		// and arg returns multiple values, glue as list
 		if(count(n->list) == 1 && n->list->n->op == OINLCALL && count(n->list->n->rlist) > 1) {
@@ -557,32 +562,39 @@ mkinlcall1(Node **np, Node *fn, int isddd)
 
 //dumplist("ninit pre", ninit);
 
-	if (fn->defn) // local function
-		dcl = fn->defn->dcl;
+	if(fn->defn) // local function
+		dcl = fn->inldcl;
 	else // imported function
 		dcl = fn->dcl;
 
 	inlretvars = nil;
 	i = 0;
 	// Make temp names to use instead of the originals
-	for(ll = dcl; ll; ll=ll->next)
+	for(ll = dcl; ll; ll=ll->next) {
+		if(ll->n->class == PPARAMOUT)  // return values handled below.
+			continue;
 		if(ll->n->op == ONAME) {
 			ll->n->inlvar = inlvar(ll->n);
 			// Typecheck because inlvar is not necessarily a function parameter.
 			typecheck(&ll->n->inlvar, Erv);
 			if ((ll->n->class&~PHEAP) != PAUTO)
 				ninit = list(ninit, nod(ODCL, ll->n->inlvar, N));  // otherwise gen won't emit the allocations for heapallocs
-			if (ll->n->class == PPARAMOUT)  // we rely on the order being correct here
-				inlretvars = list(inlretvars, ll->n->inlvar);
 		}
+	}
 
-	// anonymous return values, synthesize names for use in assignment that replaces return
-	if(inlretvars == nil && fn->type->outtuple > 0)
-		for(t = getoutargx(fn->type)->type; t; t = t->down) {
+	// temporaries for return values.
+	for(t = getoutargx(fn->type)->type; t; t = t->down) {
+		if(t != T && t->nname != N && !isblank(t->nname)) {
+			m = inlvar(t->nname);
+			typecheck(&m, Erv);
+			t->nname->inlvar = m;
+		} else {
+			// anonymous return values, synthesize names for use in assignment that replaces return
 			m = retvar(t, i++);
-			ninit = list(ninit, nod(ODCL, m, N));
-			inlretvars = list(inlretvars, m);
 		}
+		ninit = list(ninit, nod(ODCL, m, N));
+		inlretvars = list(inlretvars, m);
+	}
 
 	// assign receiver.
 	if(fn->type->thistuple && n->left->op == ODOTMETH) {
@@ -790,6 +802,13 @@ inlvar(Node *var)
 	n->class = PAUTO;
 	n->used = 1;
 	n->curfn = curfn;   // the calling function, not the called one
+	n->addrtaken = var->addrtaken;
+
+	// esc pass wont run if we're inlining into a iface wrapper
+	// luckily, we can steal the results from the target func
+	if(var->esc == EscHeap)
+		addrescapes(n);
+
 	curfn->dcl = list(curfn->dcl, n);
 	return n;
 }

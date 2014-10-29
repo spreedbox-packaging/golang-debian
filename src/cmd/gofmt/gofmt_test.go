@@ -40,7 +40,6 @@ func runTest(t *testing.T, in, out, flags string) {
 	}
 
 	initParserMode()
-	initPrinterMode()
 	initRewrite()
 
 	var buf bytes.Buffer
@@ -82,6 +81,9 @@ var tests = []struct {
 	{"testdata/rewrite3.input", "-r=x->x"},
 	{"testdata/rewrite4.input", "-r=(x)->x"},
 	{"testdata/rewrite5.input", "-r=x+x->2*x"},
+	{"testdata/rewrite6.input", "-r=fun(x)->Fun(x)"},
+	{"testdata/rewrite7.input", "-r=fun(x...)->Fun(x)"},
+	{"testdata/rewrite8.input", "-r=interface{}->int"},
 	{"testdata/stdin*.input", "-stdin"},
 	{"testdata/comments.input", ""},
 	{"testdata/import.input", ""},

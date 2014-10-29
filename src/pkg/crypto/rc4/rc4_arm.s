@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../../cmd/ld/textflag.h"
+
 // Registers
 dst = 0
 src = 1
@@ -16,7 +18,7 @@ t = 11
 t2 = 12
 
 // func xorKeyStream(dst, src *byte, n int, state *[256]byte, i, j *uint8)
-TEXT ·xorKeyStream(SB),7,$0
+TEXT ·xorKeyStream(SB),NOSPLIT,$0
 	MOVW 0(FP), R(dst)
 	MOVW 4(FP), R(src)
 	MOVW 8(FP), R(n)
@@ -31,19 +33,19 @@ loop:
 	// i += 1; j += state[i]
 	ADD $1, R(i)
 	AND $0xff, R(i)
-	MOVBU R(i)<<0(R(state)), R(t)
+	MOVBU R(i)<<2(R(state)), R(t)
 	ADD R(t), R(j)
 	AND $0xff, R(j)
 
 	// swap state[i] <-> state[j]
-	MOVBU R(j)<<0(R(state)), R(t2)
-	MOVB R(t2), R(i)<<0(R(state))
-	MOVB R(t), R(j)<<0(R(state))
+	MOVBU R(j)<<2(R(state)), R(t2)
+	MOVB R(t2), R(i)<<2(R(state))
+	MOVB R(t), R(j)<<2(R(state))
 
 	// dst[k] = src[k] ^ state[state[i] + state[j]]
 	ADD R(t2), R(t)
 	AND $0xff, R(t)
-	MOVBU R(t)<<0(R(state)), R(t)
+	MOVBU R(t)<<2(R(state)), R(t)
 	MOVBU R(k)<<0(R(src)), R(t2)
 	EOR R(t), R(t2)
 	MOVB R(t2), R(k)<<0(R(dst))

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../cmd/ld/textflag.h"
+
 #define HSqrt2 7.07106781186547524401e-01 // sqrt(2)/2
 #define Ln2Hi  6.93147180369123816490e-01 // 0x3fe62e42fee00000
 #define Ln2Lo  1.90821492927058770002e-10 // 0x3dea39ef35793c76
@@ -17,7 +19,7 @@
 #define PosInf 0x7FF0000000000000
 
 // func Log(x float64) float64
-TEXT ·Log(SB),7,$0
+TEXT ·Log(SB),NOSPLIT,$0
 	// test bits for special cases
 	MOVQ    x+0(FP), BX
 	MOVQ    $~(1<<63), AX // sign bit mask
@@ -94,16 +96,16 @@ TEXT ·Log(SB),7,$0
 	SUBSD   X2, X0 // x0= (hfsq-(s*(hfsq+R)+k*Ln2Lo))-f, x1= k
 	MULSD   $Ln2Hi, X1 // x0= (hfsq-(s*(hfsq+R)+k*Ln2Lo))-f, x1= k*Ln2Hi
 	SUBSD   X0, X1 // x1= k*Ln2Hi-((hfsq-(s*(hfsq+R)+k*Ln2Lo))-f)
-  	MOVSD   X1, r+8(FP)
+  	MOVSD   X1, ret+8(FP)
 	RET
 isInfOrNaN:
-	MOVQ    BX, r+8(FP) // +Inf or NaN, return x
+	MOVQ    BX, ret+8(FP) // +Inf or NaN, return x
 	RET
 isNegative:
 	MOVQ    $NaN, AX
-	MOVQ    AX, r+8(FP) // return NaN
+	MOVQ    AX, ret+8(FP) // return NaN
 	RET
 isZero:
 	MOVQ    $NegInf, AX
-	MOVQ    AX, r+8(FP) // return -Inf
+	MOVQ    AX, ret+8(FP) // return -Inf
 	RET

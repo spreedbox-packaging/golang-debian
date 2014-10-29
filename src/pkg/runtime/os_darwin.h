@@ -2,10 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-#define SIG_DFL ((void*)0)
-#define SIG_IGN ((void*)1)
-#define SIGHUP 1
 #define SS_DISABLE 4
+
+typedef byte* kevent_udata;
 
 int32	runtime·bsdthread_create(void*, M*, G*, void(*)(void));
 int32	runtime·bsdthread_register(void);
@@ -24,11 +23,10 @@ int32	runtime·sysctl(uint32*, uint32, byte*, uintptr*, byte*, uintptr);
 
 typedef uint32 Sigset;
 void	runtime·sigprocmask(int32, Sigset*, Sigset*);
+void	runtime·unblocksignals(void);
 
 struct Sigaction;
 void	runtime·sigaction(uintptr, struct Sigaction*, struct Sigaction*);
-void	runtime·setsig(int32, void(*)(int32, Siginfo*, void*, G*), bool);
-void	runtime·sighandler(int32 sig, Siginfo *info, void *context, G *gp);
 
 struct StackT;
 void	runtime·sigaltstack(struct StackT*, struct StackT*);
@@ -36,11 +34,9 @@ void	runtime·sigtramp(void);
 void	runtime·sigpanic(void);
 void	runtime·setitimer(int32, Itimerval*, Itimerval*);
 
-void	runtime·raisesigpipe(void);
 
 #define	NSIG 32
 #define	SI_USER	0  /* empirically true, but not what headers say */
 #define	SIG_BLOCK 1
 #define	SIG_UNBLOCK 2
 #define	SIG_SETMASK 3
-

@@ -505,8 +505,14 @@ func (d *decoder) decode() (image.Image, error) {
 	}
 
 	// Check for EOF, to verify the zlib checksum.
-	n, err := r.Read(pr[:1])
-	if err != io.EOF {
+	n := 0
+	for i := 0; n == 0 && err == nil; i++ {
+		if i == 100 {
+			return nil, io.ErrNoProgress
+		}
+		n, err = r.Read(pr[:1])
+	}
+	if err != nil && err != io.EOF {
 		return nil, FormatError(err.Error())
 	}
 	if n != 0 || d.idatLength != 0 {
@@ -652,10 +658,11 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 			}
 			return image.Config{}, err
 		}
-		if d.stage == dsSeenIHDR && d.cb != cbP8 {
+		paletted := d.cb == cbP8 || d.cb == cbP4 || d.cb == cbP2 || d.cb == cbP1
+		if d.stage == dsSeenIHDR && !paletted {
 			break
 		}
-		if d.stage == dsSeenPLTE && d.cb == cbP8 {
+		if d.stage == dsSeenPLTE && paletted {
 			break
 		}
 	}

@@ -7,19 +7,20 @@
 //
 
 #include "zasm_GOOS_GOARCH.h"
+#include "../../cmd/ld/textflag.h"
 
 // int32 lwp_create(void *context, uintptr flags, void *lwpid)
-TEXT runtime·lwp_create(SB),7,$0
+TEXT runtime·lwp_create(SB),NOSPLIT,$0
 	MOVQ	context+0(FP), DI
 	MOVQ	flags+8(FP), SI
 	MOVQ	lwpid+16(FP), DX
 	MOVL	$309, AX		// sys__lwp_create
 	SYSCALL
 	JCC	2(PC)
-	NEGL	AX
+	NEGQ	AX
 	RET
 
-TEXT runtime·lwp_tramp(SB),7,$0
+TEXT runtime·lwp_tramp(SB),NOSPLIT,$0
 	
 	// Set FS to point at m->tls.
 	LEAQ	m_tls(R8), DI
@@ -39,12 +40,12 @@ TEXT runtime·lwp_tramp(SB),7,$0
 	SYSCALL
 	JMP	-3(PC)			// keep exiting
 
-TEXT runtime·osyield(SB),7,$0
+TEXT runtime·osyield(SB),NOSPLIT,$0
 	MOVL	$350, AX		// sys_sched_yield
 	SYSCALL
 	RET
 
-TEXT runtime·lwp_park(SB),7,$0
+TEXT runtime·lwp_park(SB),NOSPLIT,$0
 	MOVQ	8(SP), DI		// arg 1 - abstime
 	MOVL	16(SP), SI		// arg 2 - unpark
 	MOVQ	24(SP), DX		// arg 3 - hint
@@ -53,33 +54,55 @@ TEXT runtime·lwp_park(SB),7,$0
 	SYSCALL
 	RET
 
-TEXT runtime·lwp_unpark(SB),7,$0
+TEXT runtime·lwp_unpark(SB),NOSPLIT,$0
 	MOVQ	8(SP), DI		// arg 1 - lwp
 	MOVL	16(SP), SI		// arg 2 - hint
 	MOVL	$321, AX		// sys__lwp_unpark
 	SYSCALL
 	RET
 
-TEXT runtime·lwp_self(SB),7,$0
+TEXT runtime·lwp_self(SB),NOSPLIT,$0
 	MOVL	$311, AX		// sys__lwp_self
 	SYSCALL
 	RET
 
 // Exit the entire program (like C exit)
-TEXT runtime·exit(SB),7,$-8
+TEXT runtime·exit(SB),NOSPLIT,$-8
 	MOVL	8(SP), DI		// arg 1 - exit status
 	MOVL	$1, AX			// sys_exit
 	SYSCALL
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·exit1(SB),7,$-8
+TEXT runtime·exit1(SB),NOSPLIT,$-8
 	MOVL	$310, AX		// sys__lwp_exit
 	SYSCALL
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·write(SB),7,$-8
+TEXT runtime·open(SB),NOSPLIT,$-8
+	MOVQ	8(SP), DI		// arg 1 pathname
+	MOVL	16(SP), SI		// arg 2 flags
+	MOVL	20(SP), DX		// arg 3 mode
+	MOVL	$5, AX
+	SYSCALL
+	RET
+
+TEXT runtime·close(SB),NOSPLIT,$-8
+	MOVL	8(SP), DI		// arg 1 fd
+	MOVL	$6, AX
+	SYSCALL
+	RET
+
+TEXT runtime·read(SB),NOSPLIT,$-8
+	MOVL	8(SP), DI		// arg 1 fd
+	MOVQ	16(SP), SI		// arg 2 buf
+	MOVL	24(SP), DX		// arg 3 count
+	MOVL	$3, AX
+	SYSCALL
+	RET
+
+TEXT runtime·write(SB),NOSPLIT,$-8
 	MOVL	8(SP), DI		// arg 1 - fd
 	MOVQ	16(SP), SI		// arg 2 - buf
 	MOVL	24(SP), DX		// arg 3 - nbyte
@@ -87,7 +110,7 @@ TEXT runtime·write(SB),7,$-8
 	SYSCALL
 	RET
 
-TEXT runtime·usleep(SB),7,$16
+TEXT runtime·usleep(SB),NOSPLIT,$16
 	MOVL	$0, DX
 	MOVL	usec+0(FP), AX
 	MOVL	$1000000, CX
@@ -103,16 +126,16 @@ TEXT runtime·usleep(SB),7,$16
 	SYSCALL
 	RET
 
-TEXT runtime·raisesigpipe(SB),7,$16
+TEXT runtime·raise(SB),NOSPLIT,$16
 	MOVL	$311, AX		// sys__lwp_self
 	SYSCALL
 	MOVQ	AX, DI			// arg 1 - target
-	MOVQ	$13, SI			// arg 2 - signo == SIGPIPE
+	MOVL	sig+0(FP), SI		// arg 2 - signo
 	MOVL	$318, AX		// sys__lwp_kill
 	SYSCALL
 	RET
 
-TEXT runtime·setitimer(SB),7,$-8
+TEXT runtime·setitimer(SB),NOSPLIT,$-8
 	MOVL	8(SP), DI		// arg 1 - which
 	MOVQ	16(SP), SI		// arg 2 - itv
 	MOVQ	24(SP), DX		// arg 3 - oitv
@@ -121,7 +144,7 @@ TEXT runtime·setitimer(SB),7,$-8
 	RET
 
 // func now() (sec int64, nsec int32)
-TEXT time·now(SB), 7, $32
+TEXT time·now(SB), NOSPLIT, $32
 	MOVQ	$0, DI			// arg 1 - clock_id
 	LEAQ	8(SP), SI		// arg 2 - tp
 	MOVL	$427, AX		// sys_clock_gettime
@@ -134,7 +157,7 @@ TEXT time·now(SB), 7, $32
 	MOVL	DX, nsec+8(FP)
 	RET
 
-TEXT runtime·nanotime(SB),7,$32
+TEXT runtime·nanotime(SB),NOSPLIT,$32
 	MOVQ	$0, DI			// arg 1 - clock_id
 	LEAQ	8(SP), SI		// arg 2 - tp
 	MOVL	$427, AX		// sys_clock_gettime
@@ -148,7 +171,7 @@ TEXT runtime·nanotime(SB),7,$32
 	ADDQ	DX, AX
 	RET
 
-TEXT runtime·getcontext(SB),7,$-8
+TEXT runtime·getcontext(SB),NOSPLIT,$-8
 	MOVQ	8(SP), DI		// arg 1 - context
 	MOVL	$307, AX		// sys_getcontext
 	SYSCALL
@@ -156,7 +179,7 @@ TEXT runtime·getcontext(SB),7,$-8
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·sigprocmask(SB),7,$0
+TEXT runtime·sigprocmask(SB),NOSPLIT,$0
 	MOVL	8(SP), DI		// arg 1 - how
 	MOVQ	16(SP), SI		// arg 2 - set
 	MOVQ	24(SP), DX		// arg 3 - oset
@@ -166,7 +189,7 @@ TEXT runtime·sigprocmask(SB),7,$0
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·sigreturn_tramp(SB),7,$-8
+TEXT runtime·sigreturn_tramp(SB),NOSPLIT,$-8
 	MOVQ	R15, DI			// Load address of ucontext
 	MOVQ	$308, AX		// sys_setcontext
 	SYSCALL
@@ -174,7 +197,7 @@ TEXT runtime·sigreturn_tramp(SB),7,$-8
 	MOVL	$1, AX			// sys_exit
 	SYSCALL
 
-TEXT runtime·sigaction(SB),7,$-8
+TEXT runtime·sigaction(SB),NOSPLIT,$-8
 	MOVL	8(SP), DI		// arg 1 - signum
 	MOVQ	16(SP), SI		// arg 2 - nsa
 	MOVQ	24(SP), DX		// arg 3 - osa
@@ -187,15 +210,16 @@ TEXT runtime·sigaction(SB),7,$-8
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·sigtramp(SB),7,$64
+TEXT runtime·sigtramp(SB),NOSPLIT,$64
 	get_tls(BX)
 
 	// check that m exists
 	MOVQ	m(BX), BP
 	CMPQ	BP, $0
-	JNE	4(PC)
+	JNE	5(PC)
 	MOVQ	DI, 0(SP)
-	CALL	runtime·badsignal(SB)
+	MOVQ	$runtime·badsignal(SB), AX
+	CALL	AX
 	RET
 
 	// save g
@@ -219,7 +243,7 @@ TEXT runtime·sigtramp(SB),7,$64
 	MOVQ	R10, g(BX)
 	RET
 
-TEXT runtime·mmap(SB),7,$0
+TEXT runtime·mmap(SB),NOSPLIT,$0
 	MOVQ	8(SP), DI		// arg 1 - addr
 	MOVQ	16(SP), SI		// arg 2 - len
 	MOVL	24(SP), DX		// arg 3 - prot
@@ -231,12 +255,10 @@ TEXT runtime·mmap(SB),7,$0
 	MOVQ	$0, R9			// arg 6 - pad
 	MOVL	$197, AX		// sys_mmap
 	SYSCALL
-	JCC	2(PC)
-	NEGL	AX
 	ADDQ	$16, SP
 	RET
 
-TEXT runtime·munmap(SB),7,$0
+TEXT runtime·munmap(SB),NOSPLIT,$0
 	MOVQ	8(SP), DI		// arg 1 - addr
 	MOVQ	16(SP), SI		// arg 2 - len
 	MOVL	$73, AX			// sys_munmap
@@ -246,7 +268,7 @@ TEXT runtime·munmap(SB),7,$0
 	RET
 
 
-TEXT runtime·madvise(SB),7,$0
+TEXT runtime·madvise(SB),NOSPLIT,$0
 	MOVQ	addr+0(FP), DI		// arg 1 - addr
 	MOVQ	len+8(FP), SI		// arg 2 - len
 	MOVQ	behav+16(FP), DX	// arg 3 - behav
@@ -255,7 +277,7 @@ TEXT runtime·madvise(SB),7,$0
 	// ignore failure - maybe pages are locked
 	RET
 
-TEXT runtime·sigaltstack(SB),7,$-8
+TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 	MOVQ	new+8(SP), DI		// arg 1 - nss
 	MOVQ	old+16(SP), SI		// arg 2 - oss
 	MOVQ	$281, AX		// sys___sigaltstack14
@@ -265,7 +287,7 @@ TEXT runtime·sigaltstack(SB),7,$-8
 	RET
 
 // set tls base to DI
-TEXT runtime·settls(SB),7,$8
+TEXT runtime·settls(SB),NOSPLIT,$8
 	// adjust for ELF: wants to use -16(FS) and -8(FS) for g and m
 	ADDQ	$16, DI			// arg 1 - ptr
 	MOVQ	$317, AX		// sys__lwp_setprivate
@@ -274,7 +296,7 @@ TEXT runtime·settls(SB),7,$8
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·sysctl(SB),7,$0
+TEXT runtime·sysctl(SB),NOSPLIT,$0
 	MOVQ	8(SP), DI		// arg 1 - name
 	MOVL	16(SP), SI		// arg 2 - namelen
 	MOVQ	24(SP), DX		// arg 3 - oldp
@@ -284,8 +306,39 @@ TEXT runtime·sysctl(SB),7,$0
 	MOVQ	$202, AX		// sys___sysctl
 	SYSCALL
 	JCC 3(PC)
-	NEGL	AX
+	NEGQ	AX
 	RET
 	MOVL	$0, AX
 	RET
 
+// int32 runtime·kqueue(void)
+TEXT runtime·kqueue(SB),NOSPLIT,$0
+	MOVQ	$0, DI
+	MOVL	$344, AX
+	SYSCALL
+	JCC	2(PC)
+	NEGQ	AX
+	RET
+
+// int32 runtime·kevent(int kq, Kevent *changelist, int nchanges, Kevent *eventlist, int nevents, Timespec *timeout)
+TEXT runtime·kevent(SB),NOSPLIT,$0
+	MOVL	8(SP), DI
+	MOVQ	16(SP), SI
+	MOVL	24(SP), DX
+	MOVQ	32(SP), R10
+	MOVL	40(SP), R8
+	MOVQ	48(SP), R9
+	MOVL	$435, AX
+	SYSCALL
+	JCC	2(PC)
+	NEGQ	AX
+	RET
+
+// void runtime·closeonexec(int32 fd)
+TEXT runtime·closeonexec(SB),NOSPLIT,$0
+	MOVL	8(SP), DI	// fd
+	MOVQ	$2, SI		// F_SETFD
+	MOVQ	$1, DX		// FD_CLOEXEC
+	MOVL	$92, AX		// fcntl
+	SYSCALL
+	RET

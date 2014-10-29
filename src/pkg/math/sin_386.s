@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../cmd/ld/textflag.h"
+
 // func Cos(x float64) float64
-TEXT ·Cos(SB),7,$0
+TEXT ·Cos(SB),NOSPLIT,$0
 	FMOVD   x+0(FP), F0  // F0=x
 	FCOS                 // F0=cos(x) if -2**63 < x < 2**63
 	FSTSW   AX           // AX=status word
 	ANDW    $0x0400, AX
 	JNE     3(PC)        // jump if x outside range
-	FMOVDP  F0, r+8(FP)
+	FMOVDP  F0, ret+8(FP)
 	RET
 	FLDPI                // F0=Pi, F1=x
 	FADDD   F0, F0       // F0=2*Pi, F1=x
@@ -20,17 +22,17 @@ TEXT ·Cos(SB),7,$0
 	JNE     -3(PC)       // jump if reduction incomplete
 	FMOVDP  F0, F1       // F0=reduced_x
 	FCOS                 // F0=cos(reduced_x)
-	FMOVDP  F0, r+8(FP)
+	FMOVDP  F0, ret+8(FP)
 	RET
 	
 // func Sin(x float64) float64
-TEXT ·Sin(SB),7,$0
+TEXT ·Sin(SB),NOSPLIT,$0
 	FMOVD   x+0(FP), F0  // F0=x
 	FSIN                 // F0=sin(x) if -2**63 < x < 2**63
 	FSTSW   AX           // AX=status word
 	ANDW    $0x0400, AX
 	JNE     3(PC)        // jump if x outside range
-	FMOVDP  F0, r+8(FP)
+	FMOVDP  F0, ret+8(FP)
 	RET
 	FLDPI                // F0=Pi, F1=x
 	FADDD   F0, F0       // F0=2*Pi, F1=x
@@ -41,5 +43,5 @@ TEXT ·Sin(SB),7,$0
 	JNE     -3(PC)       // jump if reduction incomplete
 	FMOVDP  F0, F1       // F0=reduced_x
 	FSIN                 // F0=sin(reduced_x)
-	FMOVDP  F0, r+8(FP)
+	FMOVDP  F0, ret+8(FP)
 	RET

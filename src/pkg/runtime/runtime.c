@@ -3,35 +3,59 @@
 // license that can be found in the LICENSE file.
 
 #include "runtime.h"
+#include "stack.h"
 #include "arch_GOARCH.h"
+#include "../../cmd/ld/textflag.h"
 
 enum {
 	maxround = sizeof(uintptr),
 };
 
-/*
- * We assume that all architectures turn faults and the like
- * into apparent calls to runtime.sigpanic.  If we see a "call"
- * to runtime.sigpanic, we do not back up the PC to find the
- * line number of the CALL instruction, because there is no CALL.
- */
-void	runtime·sigpanic(void);
+// Keep a cached value to make gotraceback fast,
+// since we call it on every call to gentraceback.
+// The cached value is a uint32 in which the low bit
+// is the "crash" setting and the top 31 bits are the
+// gotraceback value.
+static uint32 traceback_cache = ~(uint32)0;
 
+// The GOTRACEBACK environment variable controls the
+// behavior of a Go program that is crashing and exiting.
+//	GOTRACEBACK=0   suppress all tracebacks
+//	GOTRACEBACK=1   default behavior - show tracebacks but exclude runtime frames
+//	GOTRACEBACK=2   show tracebacks including runtime frames
+//	GOTRACEBACK=crash   show tracebacks including runtime frames, then crash (core dump etc)
 int32
-runtime·gotraceback(void)
+runtime·gotraceback(bool *crash)
 {
 	byte *p;
+	uint32 x;
 
-	p = runtime·getenv("GOTRACEBACK");
-	if(p == nil || p[0] == '\0')
-		return 1;	// default is on
-	return runtime·atoi(p);
+	if(crash != nil)
+		*crash = false;
+	if(m->traceback != 0)
+		return m->traceback;
+	x = runtime·atomicload(&traceback_cache);
+	if(x == ~(uint32)0) {
+		p = runtime·getenv("GOTRACEBACK");
+		if(p == nil)
+			p = (byte*)"";
+		if(p[0] == '\0')
+			x = 1<<1;
+		else if(runtime·strcmp(p, (byte*)"crash") == 0)
+			x = (2<<1) | 1;
+		else
+			x = runtime·atoi(p)<<1;	
+		runtime·atomicstore(&traceback_cache, x);
+	}
+	if(crash != nil)
+		*crash = x&1;
+	return x>>1;
 }
 
 int32
-runtime·mcmp(byte *s1, byte *s2, uint32 n)
+runtime·mcmp(byte *s1, byte *s2, uintptr n)
 {
-	uint32 i;
+	uintptr i;
 	byte c1, c2;
 
 	for(i=0; i<n; i++) {
@@ -73,7 +97,13 @@ runtime·args(int32 c, uint8 **v)
 }
 
 int32 runtime·isplan9;
+int32 runtime·issolaris;
 int32 runtime·iswindows;
+
+// Information about what cpu features are available.
+// Set on startup in asm_{x86/amd64}.s.
+uint32 runtime·cpuid_ecx;
+uint32 runtime·cpuid_edx;
 
 void
 runtime·goargs(void)
@@ -110,16 +140,6 @@ runtime·goenvs_unix(void)
 	syscall·envs.cap = n;
 }
 
-void
-runtime·getgoroot(String out)
-{
-	byte *p;
-
-	p = runtime·getenv("GOROOT");
-	out = runtime·gostringnocopy(p);
-	FLUSH(&out);
-}
-
 int32
 runtime·atoi(byte *p)
 {
@@ -139,11 +159,12 @@ TestAtomic64(void)
 	z64 = 42;
 	x64 = 0;
 	PREFETCH(&z64);
-	if(runtime·cas64(&z64, &x64, 1))
+	if(runtime·cas64(&z64, x64, 1))
 		runtime·throw("cas64 failed");
-	if(x64 != 42)
+	if(x64 != 0)
 		runtime·throw("cas64 failed");
-	if(!runtime·cas64(&z64, &x64, 1))
+	x64 = 42;
+	if(!runtime·cas64(&z64, x64, 1))
 		runtime·throw("cas64 failed");
 	if(x64 != 42 || z64 != 1)
 		runtime·throw("cas64 failed");
@@ -156,6 +177,10 @@ TestAtomic64(void)
 		runtime·throw("xadd64 failed");
 	if(runtime·atomicload64(&z64) != (2ull<<40)+2)
 		runtime·throw("xadd64 failed");
+	if(runtime·xchg64(&z64, (3ull<<40)+3) != (2ull<<40)+2)
+		runtime·throw("xchg64 failed");
+	if(runtime·atomicload64(&z64) != (3ull<<40)+3)
+		runtime·throw("xchg64 failed");
 }
 
 void
@@ -171,7 +196,7 @@ runtime·check(void)
 	uint64 h;
 	float32 i, i1;
 	float64 j, j1;
-	void* k;
+	byte *k, *k1;
 	uint16* l;
 	struct x1 {
 		byte x;
@@ -197,6 +222,9 @@ runtime·check(void)
 	if(offsetof(struct y1, y) != 1) runtime·throw("bad offsetof y1.y");
 	if(sizeof(struct y1) != 2) runtime·throw("bad sizeof y1");
 
+	if(runtime·timediv(12345LL*1000000000+54321, 1000000000, &e) != 12345 || e != 54321)
+		runtime·throw("bad timediv");
+
 	uint32 z;
 	z = 1;
 	if(!runtime·cas(&z, 1, 2))
@@ -209,6 +237,17 @@ runtime·check(void)
 		runtime·throw("cas3");
 	if(z != 4)
 		runtime·throw("cas4");
+
+	k = (byte*)0xfedcb123;
+	if(sizeof(void*) == 8)
+		k = (byte*)((uintptr)k<<10);
+	if(runtime·casp((void**)&k, nil, nil))
+		runtime·throw("casp1");
+	k1 = k+1;
+	if(!runtime·casp((void**)&k, k, k1))
+		runtime·throw("casp2");
+	if(k != k1)
+		runtime·throw("casp3");
 
 	*(uint64*)&j = ~0ULL;
 	if(j == j)
@@ -235,63 +274,9 @@ runtime·check(void)
 		runtime·throw("float32nan3");
 
 	TestAtomic64();
-}
 
-void
-runtime·Caller(intgo skip, uintptr retpc, String retfile, intgo retline, bool retbool)
-{
-	Func *f, *g;
-	uintptr pc;
-	uintptr rpc[2];
-
-	/*
-	 * Ask for two PCs: the one we were asked for
-	 * and what it called, so that we can see if it
-	 * "called" sigpanic.
-	 */
-	retpc = 0;
-	if(runtime·callers(1+skip-1, rpc, 2) < 2) {
-		retfile = runtime·emptystring;
-		retline = 0;
-		retbool = false;
-	} else if((f = runtime·findfunc(rpc[1])) == nil) {
-		retfile = runtime·emptystring;
-		retline = 0;
-		retbool = true;  // have retpc at least
-	} else {
-		retpc = rpc[1];
-		retfile = f->src;
-		pc = retpc;
-		g = runtime·findfunc(rpc[0]);
-		if(pc > f->entry && (g == nil || g->entry != (uintptr)runtime·sigpanic))
-			pc--;
-		retline = runtime·funcline(f, pc);
-		retbool = true;
-	}
-	FLUSH(&retpc);
-	FLUSH(&retfile);
-	FLUSH(&retline);
-	FLUSH(&retbool);
-}
-
-void
-runtime·Callers(intgo skip, Slice pc, intgo retn)
-{
-	// runtime.callers uses pc.array==nil as a signal
-	// to print a stack trace.  Pick off 0-length pc here
-	// so that we don't let a nil pc slice get to it.
-	if(pc.len == 0)
-		retn = 0;
-	else
-		retn = runtime·callers(skip, (uintptr*)pc.array, pc.len);
-	FLUSH(&retn);
-}
-
-void
-runtime·FuncForPC(uintptr pc, void *retf)
-{
-	retf = runtime·findfunc(pc);
-	FLUSH(&retf);
+	if(FixedStack != runtime·round2(FixedStack))
+		runtime·throw("FixedStack is not power-of-2");
 }
 
 uint32
@@ -337,9 +322,75 @@ runtime·tickspersecond(void)
 	return res;
 }
 
+DebugVars	runtime·debug;
+
+static struct {
+	int8*	name;
+	int32*	value;
+} dbgvar[] = {
+	{"allocfreetrace", &runtime·debug.allocfreetrace},
+	{"efence", &runtime·debug.efence},
+	{"gctrace", &runtime·debug.gctrace},
+	{"gcdead", &runtime·debug.gcdead},
+	{"scheddetail", &runtime·debug.scheddetail},
+	{"schedtrace", &runtime·debug.schedtrace},
+};
+
 void
-runtime∕pprof·runtime_cyclesPerSecond(int64 res)
+runtime·parsedebugvars(void)
 {
-	res = runtime·tickspersecond();
-	FLUSH(&res);
+	byte *p;
+	intgo i, n;
+	bool tmp;
+	
+	// gotraceback caches the GOTRACEBACK setting in traceback_cache.
+	// gotraceback can be called before the environment is available.
+	// traceback_cache must be reset after the environment is made
+	// available, in order for the environment variable to take effect.
+	// The code is fixed differently in Go 1.4.
+	// This is a limited fix for Go 1.3.3.
+	traceback_cache = ~(uint32)0;
+	runtime·gotraceback(&tmp);
+
+	p = runtime·getenv("GODEBUG");
+	if(p == nil)
+		return;
+	for(;;) {
+		for(i=0; i<nelem(dbgvar); i++) {
+			n = runtime·findnull((byte*)dbgvar[i].name);
+			if(runtime·mcmp(p, (byte*)dbgvar[i].name, n) == 0 && p[n] == '=')
+				*dbgvar[i].value = runtime·atoi(p+n+1);
+		}
+		p = runtime·strstr(p, (byte*)",");
+		if(p == nil)
+			break;
+		p++;
+	}
+}
+
+// Poor mans 64-bit division.
+// This is a very special function, do not use it if you are not sure what you are doing.
+// int64 division is lowered into _divv() call on 386, which does not fit into nosplit functions.
+// Handles overflow in a time-specific manner.
+#pragma textflag NOSPLIT
+int32
+runtime·timediv(int64 v, int32 div, int32 *rem)
+{
+	int32 res, bit;
+
+	if(v >= (int64)div*0x7fffffffLL) {
+		if(rem != nil)
+			*rem = 0;
+		return 0x7fffffff;
+	}
+	res = 0;
+	for(bit = 30; bit >= 0; bit--) {
+		if(v >= ((int64)div<<bit)) {
+			v = v - ((int64)div<<bit);
+			res += 1<<bit;
+		}
+	}
+	if(rem != nil)
+		*rem = v;
+	return res;
 }

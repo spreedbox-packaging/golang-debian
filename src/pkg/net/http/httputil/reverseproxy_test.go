@@ -16,6 +16,12 @@ import (
 	"time"
 )
 
+const fakeHopHeader = "X-Fake-Hop-Header-For-Test"
+
+func init() {
+	hopHeaders = append(hopHeaders, fakeHopHeader)
+}
+
 func TestReverseProxy(t *testing.T) {
 	const backendResponse = "I am the backend"
 	const backendStatus = 404
@@ -29,10 +35,17 @@ func TestReverseProxy(t *testing.T) {
 		if c := r.Header.Get("Connection"); c != "" {
 			t.Errorf("handler got Connection header value %q", c)
 		}
+		if c := r.Header.Get("Upgrade"); c != "" {
+			t.Errorf("handler got Upgrade header value %q", c)
+		}
 		if g, e := r.Host, "some-name"; g != e {
 			t.Errorf("backend got Host header %q, want %q", g, e)
 		}
 		w.Header().Set("X-Foo", "bar")
+		w.Header().Set("Upgrade", "foo")
+		w.Header().Set(fakeHopHeader, "foo")
+		w.Header().Add("X-Multi-Value", "foo")
+		w.Header().Add("X-Multi-Value", "bar")
 		http.SetCookie(w, &http.Cookie{Name: "flavor", Value: "chocolateChip"})
 		w.WriteHeader(backendStatus)
 		w.Write([]byte(backendResponse))
@@ -49,6 +62,7 @@ func TestReverseProxy(t *testing.T) {
 	getReq, _ := http.NewRequest("GET", frontend.URL, nil)
 	getReq.Host = "some-name"
 	getReq.Header.Set("Connection", "close")
+	getReq.Header.Set("Upgrade", "foo")
 	getReq.Close = true
 	res, err := http.DefaultClient.Do(getReq)
 	if err != nil {
@@ -59,6 +73,12 @@ func TestReverseProxy(t *testing.T) {
 	}
 	if g, e := res.Header.Get("X-Foo"), "bar"; g != e {
 		t.Errorf("got X-Foo %q; expected %q", g, e)
+	}
+	if c := res.Header.Get(fakeHopHeader); c != "" {
+		t.Errorf("got %s header value %q", fakeHopHeader, c)
+	}
+	if g, e := len(res.Header["X-Multi-Value"]), 2; g != e {
+		t.Errorf("got %d X-Multi-Value header values; expected %d", g, e)
 	}
 	if g, e := len(res.Header["Set-Cookie"]), 1; g != e {
 		t.Fatalf("got %d SetCookies, want %d", g, e)

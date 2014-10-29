@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin netbsd openbsd plan9 windows
+// +build darwin nacl netbsd openbsd plan9 solaris windows
 
 #include "runtime.h"
+#include "stack.h"
+#include "../../cmd/ld/textflag.h"
 
 // This implementation depends on OS-specific implementations of
 //
@@ -41,7 +43,7 @@ runtime·lock(Lock *l)
 		runtime·throw("runtime·lock: lock count");
 
 	// Speculative grab for lock.
-	if(runtime·casp(&l->waitm, nil, (void*)LOCKED))
+	if(runtime·casp((void**)&l->key, nil, (void*)LOCKED))
 		return;
 
 	if(m->waitsema == 0)
@@ -54,10 +56,10 @@ runtime·lock(Lock *l)
 		spin = ACTIVE_SPIN;
 
 	for(i=0;; i++) {
-		v = (uintptr)runtime·atomicloadp(&l->waitm);
+		v = (uintptr)runtime·atomicloadp((void**)&l->key);
 		if((v&LOCKED) == 0) {
 unlocked:
-			if(runtime·casp(&l->waitm, (void*)v, (void*)(v|LOCKED)))
+			if(runtime·casp((void**)&l->key, (void*)v, (void*)(v|LOCKED)))
 				return;
 			i = 0;
 		}
@@ -72,9 +74,9 @@ unlocked:
 			// Queue this M.
 			for(;;) {
 				m->nextwaitm = (void*)(v&~LOCKED);
-				if(runtime·casp(&l->waitm, (void*)v, (void*)((uintptr)m|LOCKED)))
+				if(runtime·casp((void**)&l->key, (void*)v, (void*)((uintptr)m|LOCKED)))
 					break;
-				v = (uintptr)runtime·atomicloadp(&l->waitm);
+				v = (uintptr)runtime·atomicloadp((void**)&l->key);
 				if((v&LOCKED) == 0)
 					goto unlocked;
 			}
@@ -93,32 +95,34 @@ runtime·unlock(Lock *l)
 	uintptr v;
 	M *mp;
 
-	if(--m->locks < 0)
-		runtime·throw("runtime·unlock: lock count");
-
 	for(;;) {
-		v = (uintptr)runtime·atomicloadp(&l->waitm);
+		v = (uintptr)runtime·atomicloadp((void**)&l->key);
 		if(v == LOCKED) {
-			if(runtime·casp(&l->waitm, (void*)LOCKED, nil))
+			if(runtime·casp((void**)&l->key, (void*)LOCKED, nil))
 				break;
 		} else {
 			// Other M's are waiting for the lock.
 			// Dequeue an M.
 			mp = (void*)(v&~LOCKED);
-			if(runtime·casp(&l->waitm, (void*)v, mp->nextwaitm)) {
+			if(runtime·casp((void**)&l->key, (void*)v, mp->nextwaitm)) {
 				// Dequeued an M.  Wake it.
 				runtime·semawakeup(mp);
 				break;
 			}
 		}
 	}
+
+	if(--m->locks < 0)
+		runtime·throw("runtime·unlock: lock count");
+	if(m->locks == 0 && g->preempt)  // restore the preemption request in case we've cleared it in newstack
+		g->stackguard0 = StackPreempt;
 }
 
 // One-time notifications.
 void
 runtime·noteclear(Note *n)
 {
-	n->waitm = nil;
+	n->key = 0;
 }
 
 void
@@ -127,8 +131,8 @@ runtime·notewakeup(Note *n)
 	M *mp;
 
 	do
-		mp = runtime·atomicloadp(&n->waitm);
-	while(!runtime·casp(&n->waitm, mp, (void*)LOCKED));
+		mp = runtime·atomicloadp((void**)&n->key);
+	while(!runtime·casp((void**)&n->key, mp, (void*)LOCKED));
 
 	// Successfully set waitm to LOCKED.
 	// What was it before?
@@ -146,85 +150,117 @@ runtime·notewakeup(Note *n)
 void
 runtime·notesleep(Note *n)
 {
+	if(g != m->g0)
+		runtime·throw("notesleep not on g0");
+
 	if(m->waitsema == 0)
 		m->waitsema = runtime·semacreate();
-	if(!runtime·casp(&n->waitm, nil, m)) {  // must be LOCKED (got wakeup)
-		if(n->waitm != (void*)LOCKED)
+	if(!runtime·casp((void**)&n->key, nil, m)) {  // must be LOCKED (got wakeup)
+		if(n->key != LOCKED)
 			runtime·throw("notesleep - waitm out of sync");
 		return;
 	}
 	// Queued.  Sleep.
-	if(m->profilehz > 0)
-		runtime·setprof(false);
+	m->blocked = true;
 	runtime·semasleep(-1);
-	if(m->profilehz > 0)
-		runtime·setprof(true);
+	m->blocked = false;
 }
 
-void
-runtime·notetsleep(Note *n, int64 ns)
+#pragma textflag NOSPLIT
+static bool
+notetsleep(Note *n, int64 ns, int64 deadline, M *mp)
 {
-	M *mp;
-	int64 deadline, now;
-
-	if(ns < 0) {
-		runtime·notesleep(n);
-		return;
-	}
-
-	if(m->waitsema == 0)
-		m->waitsema = runtime·semacreate();
+	// Conceptually, deadline and mp are local variables.
+	// They are passed as arguments so that the space for them
+	// does not count against our nosplit stack sequence.
 
 	// Register for wakeup on n->waitm.
-	if(!runtime·casp(&n->waitm, nil, m)) {  // must be LOCKED (got wakeup already)
-		if(n->waitm != (void*)LOCKED)
+	if(!runtime·casp((void**)&n->key, nil, m)) {  // must be LOCKED (got wakeup already)
+		if(n->key != LOCKED)
 			runtime·throw("notetsleep - waitm out of sync");
-		return;
+		return true;
 	}
 
-	if(m->profilehz > 0)
-		runtime·setprof(false);
+	if(ns < 0) {
+		// Queued.  Sleep.
+		m->blocked = true;
+		runtime·semasleep(-1);
+		m->blocked = false;
+		return true;
+	}
+
 	deadline = runtime·nanotime() + ns;
 	for(;;) {
 		// Registered.  Sleep.
+		m->blocked = true;
 		if(runtime·semasleep(ns) >= 0) {
+			m->blocked = false;
 			// Acquired semaphore, semawakeup unregistered us.
 			// Done.
-			if(m->profilehz > 0)
-				runtime·setprof(true);
-			return;
+			return true;
 		}
+		m->blocked = false;
 
 		// Interrupted or timed out.  Still registered.  Semaphore not acquired.
-		now = runtime·nanotime();
-		if(now >= deadline)
+		ns = deadline - runtime·nanotime();
+		if(ns <= 0)
 			break;
-
 		// Deadline hasn't arrived.  Keep sleeping.
-		ns = deadline - now;
 	}
-
-	if(m->profilehz > 0)
-		runtime·setprof(true);
 
 	// Deadline arrived.  Still registered.  Semaphore not acquired.
 	// Want to give up and return, but have to unregister first,
 	// so that any notewakeup racing with the return does not
 	// try to grant us the semaphore when we don't expect it.
 	for(;;) {
-		mp = runtime·atomicloadp(&n->waitm);
+		mp = runtime·atomicloadp((void**)&n->key);
 		if(mp == m) {
 			// No wakeup yet; unregister if possible.
-			if(runtime·casp(&n->waitm, mp, nil))
-				return;
+			if(runtime·casp((void**)&n->key, mp, nil))
+				return false;
 		} else if(mp == (M*)LOCKED) {
 			// Wakeup happened so semaphore is available.
 			// Grab it to avoid getting out of sync.
+			m->blocked = true;
 			if(runtime·semasleep(-1) < 0)
 				runtime·throw("runtime: unable to acquire - semaphore out of sync");
-			return;
-		} else {
+			m->blocked = false;
+			return true;
+		} else
 			runtime·throw("runtime: unexpected waitm - semaphore out of sync");
-		}
 	}
+}
+
+bool
+runtime·notetsleep(Note *n, int64 ns)
+{
+	bool res;
+
+	if(g != m->g0 && !m->gcing)
+		runtime·throw("notetsleep not on g0");
+
+	if(m->waitsema == 0)
+		m->waitsema = runtime·semacreate();
+
+	res = notetsleep(n, ns, 0, nil);
+	return res;
+}
+
+// same as runtime·notetsleep, but called on user g (not g0)
+// calls only nosplit functions between entersyscallblock/exitsyscall
+bool
+runtime·notetsleepg(Note *n, int64 ns)
+{
+	bool res;
+
+	if(g == m->g0)
+		runtime·throw("notetsleepg on g0");
+
+	if(m->waitsema == 0)
+		m->waitsema = runtime·semacreate();
+
+	runtime·entersyscallblock();
+	res = notetsleep(n, ns, 0, nil);
+	runtime·exitsyscall();
+	return res;
 }

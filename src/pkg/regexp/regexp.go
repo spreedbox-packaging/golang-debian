@@ -8,6 +8,16 @@
 // general syntax used by Perl, Python, and other languages.
 // More precisely, it is the syntax accepted by RE2 and described at
 // http://code.google.com/p/re2/wiki/Syntax, except for \C.
+// For an overview of the syntax, run
+//   godoc regexp/syntax
+//
+// The regexp implementation provided by this package is
+// guaranteed to run in time linear in the size of the input.
+// (This is a property not guaranteed by most open source
+// implementations of regular expressions.) For more information
+// about this property, see
+//	http://swtch.com/~rsc/regexp/regexp1.html
+// or any book about automata theory.
 //
 // All characters are UTF-8-encoded code points.
 //
@@ -27,11 +37,11 @@
 // of bytes; return values are adjusted as appropriate.
 //
 // If 'Submatch' is present, the return value is a slice identifying the
-// successive submatches of the expression.  Submatches are matches of
-// parenthesized subexpressions within the regular expression, numbered from
-// left to right in order of opening parenthesis.  Submatch 0 is the match of
-// the entire expression, submatch 1 the match of the first parenthesized
-// subexpression, and so on.
+// successive submatches of the expression. Submatches are matches of
+// parenthesized subexpressions (also known as capturing groups) within the
+// regular expression, numbered from left to right in order of opening
+// parenthesis. Submatch 0 is the match of the entire expression, submatch 1
+// the match of the first parenthesized subexpression, and so on.
 //
 // If 'Index' is present, matches and submatches are identified by byte index
 // pairs within the input string: result[2*n:2*n+1] identifies the indexes of
@@ -68,16 +78,17 @@ import (
 var debug = false
 
 // Regexp is the representation of a compiled regular expression.
-// The public interface is entirely through methods.
 // A Regexp is safe for concurrent use by multiple goroutines.
 type Regexp struct {
 	// read-only after Compile
 	expr           string         // as passed to Compile
 	prog           *syntax.Prog   // compiled program
+	onepass        *onePassProg   // onpass program or nil
 	prefix         string         // required prefix in unanchored matches
 	prefixBytes    []byte         // prefix, as a []byte
 	prefixComplete bool           // prefix is the entire regexp
 	prefixRune     rune           // first rune in prefix
+	prefixEnd      uint32         // pc for last rune in prefix
 	cond           syntax.EmptyOp // empty-width conditions required at start of match
 	numSubexp      int
 	subexpNames    []string
@@ -154,12 +165,17 @@ func compile(expr string, mode syntax.Flags, longest bool) (*Regexp, error) {
 	regexp := &Regexp{
 		expr:        expr,
 		prog:        prog,
+		onepass:     compileOnePass(prog),
 		numSubexp:   maxCap,
 		subexpNames: capNames,
 		cond:        prog.StartCond(),
 		longest:     longest,
 	}
-	regexp.prefix, regexp.prefixComplete = prog.Prefix()
+	if regexp.onepass == notOnePass {
+		regexp.prefix, regexp.prefixComplete = prog.Prefix()
+	} else {
+		regexp.prefix, regexp.prefixComplete, regexp.prefixEnd = onePassPrefix(prog)
+	}
 	if regexp.prefix != "" {
 		// TODO(rsc): Remove this allocation by adding
 		// IndexString to package bytes.
@@ -181,7 +197,7 @@ func (re *Regexp) get() *machine {
 		return z
 	}
 	re.mu.Unlock()
-	z := progMachine(re.prog)
+	z := progMachine(re.prog, re.onepass)
 	z.re = re
 	return z
 }
@@ -373,21 +389,18 @@ func (re *Regexp) LiteralPrefix() (prefix string, complete bool) {
 	return re.prefix, re.prefixComplete
 }
 
-// MatchReader returns whether the Regexp matches the text read by the
-// RuneReader.  The return value is a boolean: true for match, false for no
-// match.
+// MatchReader reports whether the Regexp matches the text read by the
+// RuneReader.
 func (re *Regexp) MatchReader(r io.RuneReader) bool {
 	return re.doExecute(r, nil, "", 0, 0) != nil
 }
 
-// MatchString returns whether the Regexp matches the string s.
-// The return value is a boolean: true for match, false for no match.
+// MatchString reports whether the Regexp matches the string s.
 func (re *Regexp) MatchString(s string) bool {
 	return re.doExecute(nil, nil, s, 0, 0) != nil
 }
 
-// Match returns whether the Regexp matches the byte slice b.
-// The return value is a boolean: true for match, false for no match.
+// Match reports whether the Regexp matches the byte slice b.
 func (re *Regexp) Match(b []byte) bool {
 	return re.doExecute(nil, b, "", 0, 0) != nil
 }
@@ -395,7 +408,7 @@ func (re *Regexp) Match(b []byte) bool {
 // MatchReader checks whether a textual regular expression matches the text
 // read by the RuneReader.  More complicated queries need to use Compile and
 // the full Regexp interface.
-func MatchReader(pattern string, r io.RuneReader) (matched bool, error error) {
+func MatchReader(pattern string, r io.RuneReader) (matched bool, err error) {
 	re, err := Compile(pattern)
 	if err != nil {
 		return false, err
@@ -406,7 +419,7 @@ func MatchReader(pattern string, r io.RuneReader) (matched bool, error error) {
 // MatchString checks whether a textual regular expression
 // matches a string.  More complicated queries need
 // to use Compile and the full Regexp interface.
-func MatchString(pattern string, s string) (matched bool, error error) {
+func MatchString(pattern string, s string) (matched bool, err error) {
 	re, err := Compile(pattern)
 	if err != nil {
 		return false, err
@@ -417,7 +430,7 @@ func MatchString(pattern string, s string) (matched bool, error error) {
 // Match checks whether a textual regular expression
 // matches a byte slice.  More complicated queries need
 // to use Compile and the full Regexp interface.
-func Match(pattern string, b []byte) (matched bool, error error) {
+func Match(pattern string, b []byte) (matched bool, err error) {
 	re, err := Compile(pattern)
 	if err != nil {
 		return false, err

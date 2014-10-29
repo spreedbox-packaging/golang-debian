@@ -2,12 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+#include "../../cmd/ld/textflag.h"
+
 #define PosInf 0x7FF0000000000000
 #define NaN    0x7FF8000000000001
 #define NegInf 0xFFF0000000000000
 
 // func Dim(x, y float64) float64
-TEXT ·Dim(SB),7,$0
+TEXT ·Dim(SB),NOSPLIT,$0
 	// (+Inf, +Inf) special case
 	MOVQ    x+0(FP), BX
 	MOVQ    y+8(FP), CX
@@ -36,16 +38,16 @@ dim3:	// (NaN, x) or (x, NaN)
 	SUBSD y+8(FP), X0
 	MOVSD $(0.0), X1
 	MAXSD X1, X0
-	MOVSD X0, r+16(FP)
+	MOVSD X0, ret+16(FP)
 	RET
 bothInf: // Dim(-Inf, -Inf) or Dim(+Inf, +Inf)
 	MOVQ    $NaN, AX
 isDimNaN:
-	MOVQ    AX, r+16(FP)
+	MOVQ    AX, ret+16(FP)
 	RET
 
 // func ·Max(x, y float64) float64
-TEXT ·Max(SB),7,$0
+TEXT ·Max(SB),NOSPLIT,$0
 	// +Inf special cases
 	MOVQ    $PosInf, AX
 	MOVQ    x+0(FP), R8
@@ -72,33 +74,33 @@ TEXT ·Max(SB),7,$0
 	MOVQ    R8, X0
 	MOVQ    R9, X1
 	MAXSD   X1, X0
-	MOVSD   X0, r+16(FP)
+	MOVSD   X0, ret+16(FP)
 	RET
 isMaxNaN: // return NaN
 isPosInf: // return +Inf
-	MOVQ    AX, r+16(FP)
+	MOVQ    AX, ret+16(FP)
 	RET
 isMaxZero:
 	MOVQ    $(1<<63), AX // -0.0
 	CMPQ    AX, R8
 	JEQ     +3(PC)
-	MOVQ    R8, r+16(FP) // return 0
+	MOVQ    R8, ret+16(FP) // return 0
 	RET
-	MOVQ    R9, r+16(FP) // return other 0
+	MOVQ    R9, ret+16(FP) // return other 0
 	RET
 
 /*
 	MOVQ    $0, AX
 	CMPQ    AX, R8
 	JNE     +3(PC)
-	MOVQ    R8, r+16(FP) // return 0
+	MOVQ    R8, ret+16(FP) // return 0
 	RET
-	MOVQ    R9, r+16(FP) // return other 0
+	MOVQ    R9, ret+16(FP) // return other 0
 	RET
 */
 
 // func Min(x, y float64) float64
-TEXT ·Min(SB),7,$0
+TEXT ·Min(SB),NOSPLIT,$0
 	// -Inf special cases
 	MOVQ    $NegInf, AX
 	MOVQ    x+0(FP), R8
@@ -125,18 +127,18 @@ TEXT ·Min(SB),7,$0
 	MOVQ    R8, X0
 	MOVQ    R9, X1
 	MINSD   X1, X0
-	MOVSD X0, r+16(FP)
+	MOVSD X0, ret+16(FP)
 	RET
 isMinNaN: // return NaN
 isNegInf: // return -Inf
-	MOVQ    AX, r+16(FP)
+	MOVQ    AX, ret+16(FP)
 	RET
 isMinZero:
 	MOVQ    $(1<<63), AX // -0.0
 	CMPQ    AX, R8
 	JEQ     +3(PC)
-	MOVQ    R9, r+16(FP) // return other 0
+	MOVQ    R9, ret+16(FP) // return other 0
 	RET
-	MOVQ    R8, r+16(FP) // return -0
+	MOVQ    R8, ret+16(FP) // return -0
 	RET
 

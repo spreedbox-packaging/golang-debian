@@ -2,184 +2,146 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-/* A hash table.
-   Example, hashing nul-terminated char*s:
-	hash_hash_t str_hash (void *v) {
-		char *s;
-		hash_hash_t hash = 0;
-		for (s = *(char **)v; *s != 0; s++) {
-			hash = (hash ^ *s) * 2654435769U;
-		}
-		return (hash);
-	}
-	int str_eq (void *a, void *b) {
-		return (strcmp (*(char **)a, *(char **)b) == 0);
-	}
-	void str_del (void *arg, void *data) {
-		*(char **)arg = *(char **)data;
-	}
+// This file contains the implementation of Go's map type.
+//
+// The map is just a hash table.  The data is arranged
+// into an array of buckets.  Each bucket contains up to
+// 8 key/value pairs.  The low-order bits of the hash are
+// used to select a bucket.  Each bucket contains a few
+// high-order bits of each hash to distinguish the entries
+// within a single bucket.
+//
+// If more than 8 keys hash to a bucket, we chain on
+// extra buckets.
+//
+// When the hashtable grows, we allocate a new array
+// of buckets twice as big.  Buckets are incrementally
+// copied from the old bucket array to the new bucket array.
+//
+// Map iterators walk through the array of buckets and
+// return the keys in walk order (bucket #, then overflow
+// chain order, then bucket index).  To maintain iteration
+// semantics, we never move keys within their bucket (if
+// we did, keys might be returned 0 or 2 times).  When
+// growing the table, iterators remain iterating through the
+// old table and must check the new table if the bucket
+// they are iterating through has been moved ("evacuated")
+// to the new table.
 
-	struct hash *h = hash_new (sizeof (char *), &str_hash, &str_eq, &str_del, 3, 12, 15);
-	...  3=> 2**3  entries initial size
-	... 12=> 2**12 entries before sprouting sub-tables
-	... 15=> number of adjacent probes to attempt before growing
+// Maximum number of key/value pairs a bucket can hold.
+#define BUCKETSIZE 8
 
-  Example lookup:
-	char *key = "foobar";
-	char **result_ptr;
-	if (hash_lookup (h, &key, (void **) &result_ptr)) {
-	      printf ("found in table: %s\n", *result_ptr);
-	} else {
-	      printf ("not found in table\n");
-	}
+// Maximum average load of a bucket that triggers growth.
+#define LOAD 6.5
 
-  Example insertion:
-	char *key = strdup ("foobar");
-	char **result_ptr;
-	if (hash_lookup (h, &key, (void **) &result_ptr)) {
-	      printf ("found in table: %s\n", *result_ptr);
-	      printf ("to overwrite, do   *result_ptr = key\n");
-	} else {
-	      printf ("not found in table; inserted as %s\n", *result_ptr);
-	      assert (*result_ptr == key);
-	}
+// Picking LOAD: too large and we have lots of overflow
+// buckets, too small and we waste a lot of space.  I wrote
+// a simple program to check some stats for different loads:
+// (64-bit, 8 byte keys and values)
+//        LOAD    %overflow  bytes/entry     hitprobe    missprobe
+//        4.00         2.13        20.77         3.00         4.00
+//        4.50         4.05        17.30         3.25         4.50
+//        5.00         6.85        14.77         3.50         5.00
+//        5.50        10.55        12.94         3.75         5.50
+//        6.00        15.27        11.67         4.00         6.00
+//        6.50        20.90        10.79         4.25         6.50
+//        7.00        27.14        10.15         4.50         7.00
+//        7.50        34.03         9.73         4.75         7.50
+//        8.00        41.10         9.40         5.00         8.00
+//
+// %overflow   = percentage of buckets which have an overflow bucket
+// bytes/entry = overhead bytes used per key/value pair
+// hitprobe    = # of entries to check when looking up a present key
+// missprobe   = # of entries to check when looking up an absent key
+//
+// Keep in mind this data is for maximally loaded tables, i.e. just
+// before the table grows.  Typical tables will be somewhat less loaded.
 
-  Example deletion:
-	char *key = "foobar";
-	char *result;
-	if (hash_remove (h, &key, &result)) {
-	      printf ("key found and deleted from table\n");
-	      printf ("called str_del (&result, data) to copy data to result: %s\n", result);
-	} else {
-	      printf ("not found in table\n");
-	}
+// Maximum key or value size to keep inline (instead of mallocing per element).
+// Must fit in a uint8.
+// Fast versions cannot handle big values - the cutoff size for
+// fast versions in ../../cmd/gc/walk.c must be at most this value.
+#define MAXKEYSIZE 128
+#define MAXVALUESIZE 128
 
-  Example iteration over the elements of *h:
-	char **data;
-	struct hash_iter it;
-	hash_iter_init (h, &it);
-	for (data = hash_next (&it); data != 0; data = hash_next (&it)) {
-	    printf ("%s\n", *data);
-	}
- */
-
-#define	memset(a,b,c)	runtime·memclr((byte*)(a), (uint32)(c))
-#define	memcpy(a,b,c)	runtime·memmove((byte*)(a),(byte*)(b),(uint32)(c))
-#define	assert(a)	if(!(a)) runtime·throw("hashmap assert")
-#define free(x)	runtime·free(x)
-#define memmove(a,b,c)	runtime·memmove(a, b, c)
-
-struct Hmap;		/* opaque */
-struct hash_subtable;	/* opaque */
-struct hash_entry;	/* opaque */
-
-typedef uintptr uintptr_t;
-typedef uintptr_t hash_hash_t;
-
-struct hash_iter {
-	uint8*	data;		/* returned from next */
-	int32	elemsize;	/* size of elements in table */
-	int32	changes;	/* number of changes observed last time */
-	int32	i;		/* stack pointer in subtable_state */
-	bool cycled;		/* have reached the end and wrapped to 0 */
-	hash_hash_t last_hash;	/* last hash value returned */
-	hash_hash_t cycle;	/* hash value where we started */
-	struct Hmap *h;		/* the hash table */
-	MapType *t;			/* the map type */
-	struct hash_iter_sub {
-		struct hash_entry *e;		/* pointer into subtable */
-		struct hash_entry *start;	/* start of subtable */
-		struct hash_entry *last;		/* last entry in subtable */
-	} subtable_state[4];	/* Should be large enough unless the hashing is
-				   so bad that many distinct data values hash
-				   to the same hash value.  */
-};
-
-/* Return a hashtable h 2**init_power empty entries, each with
-   "datasize" data bytes.
-   (*data_hash)(a) should return the hash value of data element *a.
-   (*data_eq)(a,b) should return whether the data at "a" and the data at "b"
-   are equal.
-   (*data_del)(arg, a) will be invoked when data element *a is about to be removed
-   from the table.  "arg" is the argument passed to "hash_remove()".
-
-   Growing is accomplished by resizing if the current tables size is less than
-   a threshold, and by adding subtables otherwise.  hint should be set
-   the expected maximum size of the table.
-   "datasize" should be in [sizeof (void*), ..., 255].  If you need a
-   bigger "datasize", store a pointer to another piece of memory. */
-
-//struct hash *hash_new (int32 datasize,
-//		hash_hash_t (*data_hash) (void *),
-//		int32 (*data_eq) (void *, void *),
-//		void (*data_del) (void *, void *),
-//		int64 hint);
-
-/* Lookup *data in *h.   If the data is found, return 1 and place a pointer to
-   the found element in *pres.   Otherwise return 0 and place 0 in *pres. */
-// int32 hash_lookup (struct hash *h, void *data, void **pres);
-
-/* Lookup *data in *h.  If the data is found, execute (*data_del) (arg, p)
-   where p points to the data in the table, then remove it from *h and return
-   1.  Otherwise return 0.  */
-// int32 hash_remove (struct hash *h, void *data, void *arg);
-
-/* Lookup *data in *h.   If the data is found, return 1, and place a pointer
-   to the found element in *pres.   Otherwise, return 0, allocate a region
-   for the data to be inserted, and place a pointer to the inserted element
-   in *pres; it is the caller's responsibility to copy the data to be
-   inserted to the pointer returned in *pres in this case.
-
-   If using garbage collection, it is the caller's responsibility to
-   add references for **pres if HASH_ADDED is returned. */
-// int32 hash_insert (struct hash *h, void *data, void **pres);
-
-/* Return the number of elements in the table. */
-// uint32 hash_count (struct hash *h);
-
-/* The following call is useful only if not using garbage collection on the
-   table.
-   Remove all sub-tables associated with *h.
-   This undoes the effects of hash_init().
-   If other memory pointed to by user data must be freed, the caller is
-   responsible for doing so by iterating over *h first; see
-   hash_iter_init()/hash_next().  */
-// void hash_destroy (struct hash *h);
-
-/*----- iteration -----*/
-
-/* Initialize *it from *h. */
-// void hash_iter_init (struct hash *h, struct hash_iter *it);
-
-/* Return the next used entry in the table with which *it was initialized. */
-// void *hash_next (struct hash_iter *it);
-
-/*---- test interface ----*/
-/* Call (*data_visit) (arg, level, data) for every data entry in the table,
-   whether used or not.   "level" is the subtable level, 0 means first level. */
-/* TESTING ONLY: DO NOT USE THIS ROUTINE IN NORMAL CODE */
-// void hash_visit (struct hash *h, void (*data_visit) (void *arg, int32 level, void *data), void *arg);
-
-/* Used by the garbage collector */
-struct hash_gciter
+typedef struct Bucket Bucket;
+struct Bucket
 {
-	int32	elemsize;
-	uint8	flag;
-	uint8	valoff;
-	uint32	i;		/* stack pointer in subtable_state */
-	struct hash_subtable *st;
-	struct hash_gciter_sub {
-		struct hash_entry *e;		/* pointer into subtable */
-		struct hash_entry *last;	/* last entry in subtable */
-	} subtable_state[4];
+	// Note: the format of the Bucket is encoded in ../../cmd/gc/reflect.c and
+	// ../reflect/type.go.  Don't change this structure without also changing that code!
+	uint8  tophash[BUCKETSIZE]; // top 8 bits of hash of each entry (or special mark below)
+	Bucket *overflow;           // overflow bucket, if any
+	uint64 data[1];             // BUCKETSIZE keys followed by BUCKETSIZE values
 };
-struct hash_gciter_data
+// NOTE: packing all the keys together and then all the values together makes the
+// code a bit more complicated than alternating key/value/key/value/... but it allows
+// us to eliminate padding which would be needed for, e.g., map[int64]int8.
+
+// tophash values.  We reserve a few possibilities for special marks.
+// Each bucket (including its overflow buckets, if any) will have either all or none of its
+// entries in the Evacuated* states (except during the evacuate() method, which only happens
+// during map writes and thus no one else can observe the map during that time).
+enum
 {
-	struct hash_subtable *st;	/* subtable pointer, or nil */
-	uint8 *key_data;		/* key data, or nil */
-	uint8 *val_data;		/* value data, or nil */
-	bool indirectkey;		/* storing pointers to keys */
-	bool indirectval;		/* storing pointers to values */
+	Empty = 0,		// cell is empty
+	EvacuatedEmpty = 1,	// cell is empty, bucket is evacuated.
+	EvacuatedX = 2,		// key/value is valid.  Entry has been evacuated to first half of larger table.
+	EvacuatedY = 3,		// same as above, but evacuated to second half of larger table.
+	MinTopHash = 4, 	// minimum tophash for a normal filled cell.
 };
-bool hash_gciter_init (struct Hmap *h, struct hash_gciter *it);
-bool hash_gciter_next (struct hash_gciter *it, struct hash_gciter_data *data);
+#define evacuated(b) ((b)->tophash[0] > Empty && (b)->tophash[0] < MinTopHash)
+
+struct Hmap
+{
+	// Note: the format of the Hmap is encoded in ../../cmd/gc/reflect.c and
+	// ../reflect/type.go.  Don't change this structure without also changing that code!
+	uintgo  count;        // # live cells == size of map.  Must be first (used by len() builtin)
+	uint32  flags;
+	uint32  hash0;        // hash seed
+	uint8   B;            // log_2 of # of buckets (can hold up to LOAD * 2^B items)
+	uint8   keysize;      // key size in bytes
+	uint8   valuesize;    // value size in bytes
+	uint16  bucketsize;   // bucket size in bytes
+
+	byte    *buckets;     // array of 2^B Buckets. may be nil if count==0.
+	byte    *oldbuckets;  // previous bucket array of half the size, non-nil only when growing
+	uintptr nevacuate;    // progress counter for evacuation (buckets less than this have been evacuated)
+};
+
+// possible flags
+enum
+{
+	IndirectKey = 1,    // storing pointers to keys
+	IndirectValue = 2,  // storing pointers to values
+	Iterator = 4,       // there may be an iterator using buckets
+	OldIterator = 8,    // there may be an iterator using oldbuckets
+};
+
+// Macros for dereferencing indirect keys
+#define IK(h, p) (((h)->flags & IndirectKey) != 0 ? *(byte**)(p) : (p))
+#define IV(h, p) (((h)->flags & IndirectValue) != 0 ? *(byte**)(p) : (p))
+
+// If you modify Hiter, also change cmd/gc/reflect.c to indicate
+// the layout of this structure.
+struct Hiter
+{
+	uint8* key; // Must be in first position.  Write nil to indicate iteration end (see cmd/gc/range.c).
+	uint8* value; // Must be in second position (see cmd/gc/range.c).
+
+	MapType *t;
+	Hmap *h;
+	byte *buckets; // bucket ptr at hash_iter initialization time
+	struct Bucket *bptr; // current bucket
+
+	uint8 offset; // intra-bucket offset to start from during iteration (should be big enough to hold BUCKETSIZE-1)
+	bool done;
+
+	// state of table at time iterator is initialized
+	uint8 B;
+
+	// iter state
+	uintptr bucket;
+	uintptr i;
+	intptr check_bucket;
+};
+

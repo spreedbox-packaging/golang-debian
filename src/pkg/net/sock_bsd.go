@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin freebsd netbsd openbsd
+// +build darwin dragonfly freebsd nacl netbsd openbsd
 
 package net
 
@@ -26,6 +26,12 @@ func maxListenerBacklog() int {
 	}
 	if n == 0 || err != nil {
 		return syscall.SOMAXCONN
+	}
+	// FreeBSD stores the backlog in a uint16, as does Linux.
+	// Assume the other BSDs do too. Truncate number to avoid wrapping.
+	// See issue 5030.
+	if n > 1<<16-1 {
+		n = 1<<16 - 1
 	}
 	return int(n)
 }

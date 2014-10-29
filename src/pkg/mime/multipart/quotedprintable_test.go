@@ -32,8 +32,9 @@ func TestQuotedPrintable(t *testing.T) {
 		{in: "foo bar=0", want: "foo bar", err: io.ErrUnexpectedEOF},
 		{in: "foo bar=ab", want: "foo bar", err: "multipart: invalid quoted-printable hex byte 0x61"},
 		{in: "foo bar=0D=0A", want: "foo bar\r\n"},
-		{in: " A B =\r\n C ", want: "A B C"},
-		{in: " A B =\n C ", want: "A B C"}, // lax. treating LF as CRLF
+		{in: " A B        \r\n C ", want: " A B\r\n C"},
+		{in: " A B =\r\n C ", want: " A B  C"},
+		{in: " A B =\n C ", want: " A B  C"}, // lax. treating LF as CRLF
 		{in: "foo=\nbar", want: "foobar"},
 		{in: "foo\x00bar", want: "foo", err: "multipart: invalid unescaped byte 0x00 in quoted-printable body"},
 		{in: "foo bar\xff", want: "foo bar", err: "multipart: invalid unescaped byte 0xff in quoted-printable body"},
@@ -57,6 +58,10 @@ func TestQuotedPrintable(t *testing.T) {
 		{in: "foo=\nbar", want: "foobar"},
 		{in: "foo=\rbar", want: "foo", err: "multipart: invalid quoted-printable hex byte 0x0d"},
 		{in: "foo=\r\r\r \nbar", want: "foo", err: `multipart: invalid bytes after =: "\r\r\r \n"`},
+
+		// Example from RFC 2045:
+		{in: "Now's the time =\n" + "for all folk to come=\n" + " to the aid of their country.",
+			want: "Now's the time for all folk to come to the aid of their country."},
 	}
 	for _, tt := range tests {
 		var buf bytes.Buffer
@@ -126,7 +131,7 @@ func TestQPExhaustive(t *testing.T) {
 					return
 				}
 				if strings.HasSuffix(errStr, "0x0a") || strings.HasSuffix(errStr, "0x0d") {
-					// bunch of cases; since whitespace at the end of of a line before \n is removed.
+					// bunch of cases; since whitespace at the end of a line before \n is removed.
 					return
 				}
 			}

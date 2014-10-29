@@ -7,7 +7,6 @@
 package syscall
 
 const (
-	//O_CLOEXEC                         = 0x100000
 	AF_APPLETALK                      = 0x10
 	AF_ARP                            = 0x23
 	AF_ATM                            = 0x1e
@@ -26,13 +25,15 @@ const (
 	AF_IMPLINK                        = 0x3
 	AF_INET                           = 0x2
 	AF_INET6                          = 0x1c
+	AF_INET6_SDP                      = 0x2a
+	AF_INET_SDP                       = 0x28
 	AF_IPX                            = 0x17
 	AF_ISDN                           = 0x1a
 	AF_ISO                            = 0x7
 	AF_LAT                            = 0xe
 	AF_LINK                           = 0x12
 	AF_LOCAL                          = 0x1
-	AF_MAX                            = 0x26
+	AF_MAX                            = 0x2a
 	AF_NATM                           = 0x1d
 	AF_NETBIOS                        = 0x6
 	AF_NETGRAPH                       = 0x20
@@ -129,7 +130,7 @@ const (
 	BIOCGETZMAX                       = 0x4004427f
 	BIOCGHDRCMPLT                     = 0x40044274
 	BIOCGRSIG                         = 0x40044272
-	BIOCGRTIMEOUT                     = 0x400c426e
+	BIOCGRTIMEOUT                     = 0x4010426e
 	BIOCGSEESENT                      = 0x40044276
 	BIOCGSTATS                        = 0x4008426f
 	BIOCGTSTAMP                       = 0x40044283
@@ -148,7 +149,7 @@ const (
 	BIOCSETZBUF                       = 0x800c4281
 	BIOCSHDRCMPLT                     = 0x80044275
 	BIOCSRSIG                         = 0x80044273
-	BIOCSRTIMEOUT                     = 0x800c426d
+	BIOCSRTIMEOUT                     = 0x8010426d
 	BIOCSSEESENT                      = 0x80044277
 	BIOCSTSTAMP                       = 0x80044284
 	BIOCVERSION                       = 0x40044271
@@ -333,10 +334,11 @@ const (
 	DLT_LINUX_SLL                     = 0x71
 	DLT_LOOP                          = 0x6c
 	DLT_LTALK                         = 0x72
-	DLT_MATCHING_MAX                  = 0xf2
+	DLT_MATCHING_MAX                  = 0xf6
 	DLT_MATCHING_MIN                  = 0x68
 	DLT_MFR                           = 0xb6
 	DLT_MOST                          = 0xd3
+	DLT_MPEG_2_TS                     = 0xf3
 	DLT_MPLS                          = 0xdb
 	DLT_MTP2                          = 0x8c
 	DLT_MTP2_WITH_PHDR                = 0x8b
@@ -344,7 +346,9 @@ const (
 	DLT_MUX27010                      = 0xec
 	DLT_NETANALYZER                   = 0xf0
 	DLT_NETANALYZER_TRANSPARENT       = 0xf1
+	DLT_NFC_LLCP                      = 0xf5
 	DLT_NFLOG                         = 0xef
+	DLT_NG40                          = 0xf4
 	DLT_NULL                          = 0x0
 	DLT_PCI_EXP                       = 0x7d
 	DLT_PFLOG                         = 0x75
@@ -424,6 +428,7 @@ const (
 	EV_DELETE                         = 0x2
 	EV_DISABLE                        = 0x8
 	EV_DISPATCH                       = 0x80
+	EV_DROP                           = 0x1000
 	EV_ENABLE                         = 0x4
 	EV_EOF                            = 0x8000
 	EV_ERROR                          = 0x4000
@@ -464,6 +469,7 @@ const (
 	F_WRLCK                           = 0x3
 	HUPCL                             = 0x4000
 	ICANON                            = 0x100
+	ICMP6_FILTER                      = 0x12
 	ICRNL                             = 0x100
 	IEXTEN                            = 0x400
 	IFAN_ARRIVAL                      = 0x0
@@ -518,6 +524,7 @@ const (
 	IFT_BGPPOLICYACCOUNTING           = 0xa2
 	IFT_BRIDGE                        = 0xd1
 	IFT_BSC                           = 0x53
+	IFT_CARP                          = 0xf8
 	IFT_CCTEMUL                       = 0x3d
 	IFT_CEPT                          = 0x13
 	IFT_CES                           = 0x85
@@ -985,6 +992,39 @@ const (
 	LOCK_NB                           = 0x4
 	LOCK_SH                           = 0x1
 	LOCK_UN                           = 0x8
+	MADV_AUTOSYNC                     = 0x7
+	MADV_CORE                         = 0x9
+	MADV_DONTNEED                     = 0x4
+	MADV_FREE                         = 0x5
+	MADV_NOCORE                       = 0x8
+	MADV_NORMAL                       = 0x0
+	MADV_NOSYNC                       = 0x6
+	MADV_PROTECT                      = 0xa
+	MADV_RANDOM                       = 0x1
+	MADV_SEQUENTIAL                   = 0x2
+	MADV_WILLNEED                     = 0x3
+	MAP_ALIGNED_SUPER                 = 0x1000000
+	MAP_ALIGNMENT_MASK                = -0x1000000
+	MAP_ALIGNMENT_SHIFT               = 0x18
+	MAP_ANON                          = 0x1000
+	MAP_ANONYMOUS                     = 0x1000
+	MAP_COPY                          = 0x2
+	MAP_FILE                          = 0x0
+	MAP_FIXED                         = 0x10
+	MAP_HASSEMAPHORE                  = 0x200
+	MAP_NOCORE                        = 0x20000
+	MAP_NORESERVE                     = 0x40
+	MAP_NOSYNC                        = 0x800
+	MAP_PREFAULT_READ                 = 0x40000
+	MAP_PRIVATE                       = 0x2
+	MAP_RENAME                        = 0x20
+	MAP_RESERVED0080                  = 0x80
+	MAP_RESERVED0100                  = 0x100
+	MAP_SHARED                        = 0x1
+	MAP_STACK                         = 0x400
+	MCL_CURRENT                       = 0x1
+	MCL_FUTURE                        = 0x2
+	MSG_CMSG_CLOEXEC                  = 0x40000
 	MSG_COMPAT                        = 0x8000
 	MSG_CTRUNC                        = 0x20
 	MSG_DONTROUTE                     = 0x4
@@ -998,6 +1038,10 @@ const (
 	MSG_PEEK                          = 0x2
 	MSG_TRUNC                         = 0x10
 	MSG_WAITALL                       = 0x40
+	MS_ASYNC                          = 0x1
+	MS_INVALIDATE                     = 0x2
+	MS_SYNC                           = 0x0
+	NAME_MAX                          = 0xff
 	NET_RT_DUMP                       = 0x1
 	NET_RT_FLAGS                      = 0x2
 	NET_RT_IFLIST                     = 0x3
@@ -1037,6 +1081,7 @@ const (
 	O_ACCMODE                         = 0x3
 	O_APPEND                          = 0x8
 	O_ASYNC                           = 0x40
+	O_CLOEXEC                         = 0x100000
 	O_CREAT                           = 0x200
 	O_DIRECT                          = 0x10000
 	O_DIRECTORY                       = 0x20000
@@ -1059,6 +1104,13 @@ const (
 	PARMRK                            = 0x8
 	PARODD                            = 0x2000
 	PENDIN                            = 0x20000000
+	PRIO_PGRP                         = 0x1
+	PRIO_PROCESS                      = 0x0
+	PRIO_USER                         = 0x2
+	PROT_EXEC                         = 0x4
+	PROT_NONE                         = 0x0
+	PROT_READ                         = 0x1
+	PROT_WRITE                        = 0x2
 	RLIMIT_AS                         = 0xa
 	RLIMIT_CORE                       = 0x4
 	RLIMIT_CPU                        = 0x0
@@ -1090,6 +1142,7 @@ const (
 	RTF_DYNAMIC                       = 0x10
 	RTF_FMASK                         = 0x1004d808
 	RTF_GATEWAY                       = 0x2
+	RTF_GWFLAG_COMPAT                 = 0x80000000
 	RTF_HOST                          = 0x4
 	RTF_LLDATA                        = 0x400
 	RTF_LLINFO                        = 0x400
@@ -1151,7 +1204,7 @@ const (
 	SHUT_WR                           = 0x1
 	SIOCADDMULTI                      = 0x80206931
 	SIOCADDRT                         = 0x8030720a
-	SIOCAIFADDR                       = 0x8044692b
+	SIOCAIFADDR                       = 0x8040691a
 	SIOCAIFGROUP                      = 0x80246987
 	SIOCALIFADDR                      = 0x8118691b
 	SIOCATMARK                        = 0x40047307
@@ -1185,7 +1238,7 @@ const (
 	SIOCGIFPDSTADDR                   = 0xc0206948
 	SIOCGIFPHYS                       = 0xc0206935
 	SIOCGIFPSRCADDR                   = 0xc0206947
-	SIOCGIFSTATUS                     = 0xc334693b
+	SIOCGIFSTATUS                     = 0xc331693b
 	SIOCGLIFADDR                      = 0xc118691c
 	SIOCGLIFPHYADDR                   = 0xc118694b
 	SIOCGLOWAT                        = 0x40047303
@@ -1213,15 +1266,17 @@ const (
 	SIOCSIFMTU                        = 0x80206934
 	SIOCSIFNAME                       = 0x80206928
 	SIOCSIFNETMASK                    = 0x80206916
-	SIOCSIFPHYADDR                    = 0x80446946
+	SIOCSIFPHYADDR                    = 0x80406946
 	SIOCSIFPHYS                       = 0x80206936
 	SIOCSIFRVNET                      = 0xc020695b
 	SIOCSIFVNET                       = 0xc020695a
 	SIOCSLIFPHYADDR                   = 0x8118694a
 	SIOCSLOWAT                        = 0x80047302
 	SIOCSPGRP                         = 0x80047308
+	SOCK_CLOEXEC                      = 0x10000000
 	SOCK_DGRAM                        = 0x2
 	SOCK_MAXADDRLEN                   = 0xff
+	SOCK_NONBLOCK                     = 0x20000000
 	SOCK_RAW                          = 0x3
 	SOCK_RDM                          = 0x4
 	SOCK_SEQPACKET                    = 0x5
@@ -1261,6 +1316,7 @@ const (
 	SO_TYPE                           = 0x1008
 	SO_USELOOPBACK                    = 0x40
 	SO_USER_COOKIE                    = 0x1015
+	SO_VENDOR                         = 0x80000000
 	TCIFLUSH                          = 0x1
 	TCIOFLUSH                         = 0x3
 	TCOFLUSH                          = 0x2
@@ -1284,6 +1340,7 @@ const (
 	TCP_NODELAY                       = 0x1
 	TCP_NOOPT                         = 0x8
 	TCP_NOPUSH                        = 0x4
+	TCP_VENDOR                        = 0x80000000
 	TCSAFLUSH                         = 0x2
 	TIOCCBRK                          = 0x2000747a
 	TIOCCDTR                          = 0x20007478
@@ -1345,7 +1402,7 @@ const (
 	TIOCSTI                           = 0x80017472
 	TIOCSTOP                          = 0x2000746f
 	TIOCSWINSZ                        = 0x80087467
-	TIOCTIMESTAMP                     = 0x400c7459
+	TIOCTIMESTAMP                     = 0x40107459
 	TIOCUCNTL                         = 0x80047466
 	TOSTOP                            = 0x400000
 	VDISCARD                          = 0xf
@@ -1369,10 +1426,12 @@ const (
 	VWERASE                           = 0x4
 	WCONTINUED                        = 0x4
 	WCOREFLAG                         = 0x80
+	WEXITED                           = 0x10
 	WLINUXCLONE                       = 0x80000000
 	WNOHANG                           = 0x1
 	WNOWAIT                           = 0x8
 	WSTOPPED                          = 0x2
+	WTRAPPED                          = 0x20
 	WUNTRACED                         = 0x2
 )
 
@@ -1415,7 +1474,7 @@ const (
 	EIO             = Errno(0x5)
 	EISCONN         = Errno(0x38)
 	EISDIR          = Errno(0x15)
-	ELAST           = Errno(0x5e)
+	ELAST           = Errno(0x60)
 	ELOOP           = Errno(0x3e)
 	EMFILE          = Errno(0x18)
 	EMLINK          = Errno(0x1f)
@@ -1444,12 +1503,14 @@ const (
 	ENOTCONN        = Errno(0x39)
 	ENOTDIR         = Errno(0x14)
 	ENOTEMPTY       = Errno(0x42)
+	ENOTRECOVERABLE = Errno(0x5f)
 	ENOTSOCK        = Errno(0x26)
 	ENOTSUP         = Errno(0x2d)
 	ENOTTY          = Errno(0x19)
 	ENXIO           = Errno(0x6)
 	EOPNOTSUPP      = Errno(0x2d)
 	EOVERFLOW       = Errno(0x54)
+	EOWNERDEAD      = Errno(0x60)
 	EPERM           = Errno(0x1)
 	EPFNOSUPPORT    = Errno(0x2e)
 	EPIPE           = Errno(0x20)
@@ -1612,6 +1673,8 @@ var errors = [...]string{
 	92: "protocol error",
 	93: "capabilities insufficient",
 	94: "not permitted in capability mode",
+	95: "state not recoverable",
+	96: "previous owner died",
 }
 
 // Signal table

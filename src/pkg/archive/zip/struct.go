@@ -21,6 +21,7 @@ package zip
 
 import (
 	"os"
+	"path"
 	"time"
 )
 
@@ -64,8 +65,15 @@ const (
 	zip64ExtraId = 0x0001 // zip64 Extended Information Extra Field
 )
 
+// FileHeader describes a file within a zip file.
+// See the zip spec for details.
 type FileHeader struct {
-	Name               string
+	// Name is the name of the file.
+	// It must be a relative path: it must not start with a drive
+	// letter (e.g. C:) or leading slash, and only forward slashes
+	// are allowed.
+	Name string
+
 	CreatorVersion     uint16
 	ReaderVersion      uint16
 	Flags              uint16
@@ -92,7 +100,7 @@ type headerFileInfo struct {
 	fh *FileHeader
 }
 
-func (fi headerFileInfo) Name() string { return fi.fh.Name }
+func (fi headerFileInfo) Name() string { return path.Base(fi.fh.Name) }
 func (fi headerFileInfo) Size() int64 {
 	if fi.fh.UncompressedSize64 > 0 {
 		return int64(fi.fh.UncompressedSize64)
@@ -106,6 +114,9 @@ func (fi headerFileInfo) Sys() interface{}   { return fi.fh }
 
 // FileInfoHeader creates a partially-populated FileHeader from an
 // os.FileInfo.
+// Because os.FileInfo's Name method returns only the base name of
+// the file it describes, it may be necessary to modify the Name field
+// of the returned header to provide the full path name of the file.
 func FileInfoHeader(fi os.FileInfo) (*FileHeader, error) {
 	size := fi.Size()
 	fh := &FileHeader{
@@ -163,13 +174,13 @@ func timeToMsDosTime(t time.Time) (fDate uint16, fTime uint16) {
 	return
 }
 
-// ModTime returns the modification time.
+// ModTime returns the modification time in UTC.
 // The resolution is 2s.
 func (h *FileHeader) ModTime() time.Time {
 	return msDosTimeToTime(h.ModifiedDate, h.ModifiedTime)
 }
 
-// SetModTime sets the ModifiedTime and ModifiedDate fields to the given time.
+// SetModTime sets the ModifiedTime and ModifiedDate fields to the given time in UTC.
 // The resolution is 2s.
 func (h *FileHeader) SetModTime(t time.Time) {
 	h.ModifiedDate, h.ModifiedTime = timeToMsDosTime(t)

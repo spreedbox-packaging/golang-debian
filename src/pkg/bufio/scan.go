@@ -16,7 +16,7 @@ import (
 // the Scan method will step through the 'tokens' of a file, skipping
 // the bytes between the tokens. The specification of a token is
 // defined by a split function of type SplitFunc; the default split
-// function breaks the input into lines with newlines stripped. Split
+// function breaks the input into lines with line termination stripped. Split
 // functions are defined in this package for scanning a file into
 // lines, bytes, UTF-8-encoded runes, and space-delimited words. The
 // client may instead provide a custom split function.
@@ -26,8 +26,6 @@ import (
 // advanced arbitrarily far past the last token. Programs that need more
 // control over error handling or large tokens, or must run sequential scans
 // on a reader, should use bufio.Reader instead.
-//
-// TODO(r): Provide executable examples.
 //
 type Scanner struct {
 	r            io.Reader // The reader provided by the client.
@@ -46,8 +44,8 @@ type Scanner struct {
 // to give. The return values are the number of bytes to advance the input
 // and the next token to return to the user, plus an error, if any. If the
 // data does not yet hold a complete token, for instance if it has no newline
-// while scanning lines, SplitFunc can return (0, nil) to signal the Scanner
-// to read more data into the slice and try again with a longer slice
+// while scanning lines, SplitFunc can return (0, nil, nil) to signal the
+// Scanner to read more data into the slice and try again with a longer slice
 // starting at the same point in the input.
 //
 // If the returned error is non-nil, scanning stops and the error
@@ -72,6 +70,7 @@ const (
 )
 
 // NewScanner returns a new Scanner to read from r.
+// The split function defaults to ScanLines.
 func NewScanner(r io.Reader) *Scanner {
 	return &Scanner{
 		r:            r,
@@ -136,7 +135,7 @@ func (s *Scanner) Scan() bool {
 		}
 		// Must read more data.
 		// First, shift data to beginning of buffer if there's lots of empty space
-		// or space is neded.
+		// or space is needed.
 		if s.start > 0 && (s.end == len(s.buf) || s.start > len(s.buf)/2) {
 			copy(s.buf, s.buf[s.start:s.end])
 			s.end -= s.start
@@ -159,17 +158,26 @@ func (s *Scanner) Scan() bool {
 			s.start = 0
 			continue
 		}
-		// Finally we can read some input.
-		n, err := s.r.Read(s.buf[s.end:len(s.buf)])
-		if err != nil {
-			s.setErr(err)
+		// Finally we can read some input. Make sure we don't get stuck with
+		// a misbehaving Reader. Officially we don't need to do this, but let's
+		// be extra careful: Scanner is for safe, simple jobs.
+		for loop := 0; ; {
+			n, err := s.r.Read(s.buf[s.end:len(s.buf)])
+			s.end += n
+			if err != nil {
+				s.setErr(err)
+				break
+			}
+			if n > 0 {
+				break
+			}
+			loop++
+			if loop > maxConsecutiveEmptyReads {
+				s.setErr(io.ErrNoProgress)
+				break
+			}
 		}
-		if n == 0 { // Don't loop forever if Reader doesn't deliver EOF.
-			s.err = io.EOF
-		}
-		s.end += n
 	}
-	panic("not reached")
 }
 
 // advance consumes n bytes of the buffer. It reports whether the advance was legal.
@@ -260,7 +268,7 @@ func dropCR(data []byte) []byte {
 // ScanLines is a split function for a Scanner that returns each line of
 // text, stripped of any trailing end-of-line marker. The returned line may
 // be empty. The end-of-line marker is one optional carriage return followed
-// by one mandatory newline. In regular expression notation, it is `\r?\n'.
+// by one mandatory newline. In regular expression notation, it is `\r?\n`.
 // The last non-empty line of input will be returned even if it has no
 // newline.
 func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -279,7 +287,7 @@ func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	return 0, nil, nil
 }
 
-// isSpace returns whether the character is a Unicode white space character.
+// isSpace reports whether the character is a Unicode white space character.
 // We avoid dependency on the unicode package, but check validity of the implementation
 // in the tests.
 func isSpace(r rune) bool {
@@ -298,7 +306,7 @@ func isSpace(r rune) bool {
 		return true
 	}
 	switch r {
-	case '\u1680', '\u180e', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000':
+	case '\u1680', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000':
 		return true
 	}
 	return false

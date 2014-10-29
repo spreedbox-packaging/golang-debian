@@ -5,8 +5,12 @@
 package race_test
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"runtime"
 	"sync"
 	"testing"
@@ -227,11 +231,90 @@ func TestRaceCaseFallthrough(t *testing.T) {
 	<-ch
 }
 
+func TestRaceCaseIssue6418(t *testing.T) {
+	m := map[string]map[string]string{
+		"a": map[string]string{
+			"b": "c",
+		},
+	}
+	ch := make(chan int)
+	go func() {
+		m["a"]["x"] = "y"
+		ch <- 1
+	}()
+	switch m["a"]["b"] {
+	}
+	<-ch
+}
+
+func TestRaceCaseType(t *testing.T) {
+	var x, y int
+	var i interface{} = x
+	c := make(chan int, 1)
+	go func() {
+		switch i.(type) {
+		case nil:
+		case int:
+		}
+		c <- 1
+	}()
+	i = y
+	<-c
+}
+
+func TestRaceCaseTypeBody(t *testing.T) {
+	var x, y int
+	var i interface{} = &x
+	c := make(chan int, 1)
+	go func() {
+		switch i := i.(type) {
+		case nil:
+		case *int:
+			*i = y
+		}
+		c <- 1
+	}()
+	x = y
+	<-c
+}
+
+func TestRaceCaseTypeIssue5890(t *testing.T) {
+	// spurious extra instrumentation of the initial interface
+	// value.
+	var x, y int
+	m := make(map[int]map[int]interface{})
+	m[0] = make(map[int]interface{})
+	c := make(chan int, 1)
+	go func() {
+		switch i := m[0][1].(type) {
+		case nil:
+		case *int:
+			*i = x
+		}
+		c <- 1
+	}()
+	m[0][1] = y
+	<-c
+}
+
 func TestNoRaceRange(t *testing.T) {
 	ch := make(chan int, 3)
 	a := [...]int{1, 2, 3}
 	for _, v := range a {
 		ch <- v
+	}
+	close(ch)
+}
+
+func TestNoRaceRangeIssue5446(t *testing.T) {
+	ch := make(chan int, 3)
+	a := []int{1, 2, 3}
+	b := []int{4}
+	// used to insert a spurious instrumentation of a[i]
+	// and crash.
+	i := 1
+	for i, a[i] = range b {
+		ch <- i
 	}
 	close(ch)
 }
@@ -256,6 +339,94 @@ func TestRaceRange(t *testing.T) {
 	for i := 0; i < N; i++ {
 		<-done
 	}
+}
+
+func TestRaceForInit(t *testing.T) {
+	c := make(chan int)
+	x := 0
+	go func() {
+		c <- x
+	}()
+	for x = 42; false; {
+	}
+	<-c
+}
+
+func TestNoRaceForInit(t *testing.T) {
+	done := make(chan bool)
+	c := make(chan bool)
+	x := 0
+	go func() {
+		for {
+			_, ok := <-c
+			if !ok {
+				done <- true
+				return
+			}
+			x++
+		}
+	}()
+	i := 0
+	for x = 42; i < 10; i++ {
+		c <- true
+	}
+	close(c)
+	<-done
+}
+
+func TestRaceForTest(t *testing.T) {
+	done := make(chan bool)
+	c := make(chan bool)
+	stop := false
+	go func() {
+		for {
+			_, ok := <-c
+			if !ok {
+				done <- true
+				return
+			}
+			stop = true
+		}
+	}()
+	for !stop {
+		c <- true
+	}
+	close(c)
+	<-done
+}
+
+func TestRaceForIncr(t *testing.T) {
+	done := make(chan bool)
+	c := make(chan bool)
+	x := 0
+	go func() {
+		for {
+			_, ok := <-c
+			if !ok {
+				done <- true
+				return
+			}
+			x++
+		}
+	}()
+	for i := 0; i < 10; x++ {
+		i++
+		c <- true
+	}
+	close(c)
+	<-done
+}
+
+func TestNoRaceForIncr(t *testing.T) {
+	done := make(chan bool)
+	x := 0
+	go func() {
+		x++
+		done <- true
+	}()
+	for i := 0; i < 0; x++ {
+	}
+	<-done
 }
 
 func TestRacePlus(t *testing.T) {
@@ -300,6 +471,102 @@ func TestNoRacePlus(t *testing.T) {
 	}()
 	go func() {
 		f = z + x
+		ch <- 1
+	}()
+	<-ch
+	<-ch
+}
+
+func TestRaceComplement(t *testing.T) {
+	var x, y, z int
+	ch := make(chan int, 2)
+
+	go func() {
+		x = ^y
+		ch <- 1
+	}()
+	go func() {
+		y = ^z
+		ch <- 1
+	}()
+	<-ch
+	<-ch
+}
+
+func TestRaceDiv(t *testing.T) {
+	var x, y, z int
+	ch := make(chan int, 2)
+
+	go func() {
+		x = y / (z + 1)
+		ch <- 1
+	}()
+	go func() {
+		y = z
+		ch <- 1
+	}()
+	<-ch
+	<-ch
+}
+
+func TestRaceDivConst(t *testing.T) {
+	var x, y, z uint32
+	ch := make(chan int, 2)
+
+	go func() {
+		x = y / 3 // involves only a HMUL node
+		ch <- 1
+	}()
+	go func() {
+		y = z
+		ch <- 1
+	}()
+	<-ch
+	<-ch
+}
+
+func TestRaceMod(t *testing.T) {
+	var x, y, z int
+	ch := make(chan int, 2)
+
+	go func() {
+		x = y % (z + 1)
+		ch <- 1
+	}()
+	go func() {
+		y = z
+		ch <- 1
+	}()
+	<-ch
+	<-ch
+}
+
+func TestRaceModConst(t *testing.T) {
+	var x, y, z int
+	ch := make(chan int, 2)
+
+	go func() {
+		x = y % 3
+		ch <- 1
+	}()
+	go func() {
+		y = z
+		ch <- 1
+	}()
+	<-ch
+	<-ch
+}
+
+func TestRaceRotate(t *testing.T) {
+	var x, y, z uint32
+	ch := make(chan int, 2)
+
+	go func() {
+		x = y<<12 | y>>20
+		ch <- 1
+	}()
+	go func() {
+		y = z
 		ch <- 1
 	}()
 	<-ch
@@ -368,8 +635,7 @@ func TestRaceSprint(t *testing.T) {
 	<-ch
 }
 
-// Not implemented.
-func TestRaceFailingArrayCopy(t *testing.T) {
+func TestRaceArrayCopy(t *testing.T) {
 	ch := make(chan bool, 1)
 	var a [5]int
 	go func() {
@@ -377,6 +643,24 @@ func TestRaceFailingArrayCopy(t *testing.T) {
 		ch <- true
 	}()
 	a = [5]int{1, 2, 3, 4, 5}
+	<-ch
+}
+
+// Blows up a naive compiler.
+func TestRaceNestedArrayCopy(t *testing.T) {
+	ch := make(chan bool, 1)
+	type (
+		Point32   [2][2][2][2][2]Point
+		Point1024 [2][2][2][2][2]Point32
+		Point32k  [2][2][2][2][2]Point1024
+		Point1M   [2][2][2][2][2]Point32k
+	)
+	var a, b Point1M
+	go func() {
+		a[0][1][0][1][0][1][0][1][0][1][0][1][0][1][0][1][0][1][0][1].y = 1
+		ch <- true
+	}()
+	a = b
 	<-ch
 }
 
@@ -478,6 +762,30 @@ func TestRaceIfaceWW(t *testing.T) {
 	<-ch
 	b = a
 	a = b
+}
+
+func TestRaceIfaceCmp(t *testing.T) {
+	var a, b Writer
+	a = DummyWriter{1}
+	ch := make(chan bool, 1)
+	go func() {
+		a = DummyWriter{1}
+		ch <- true
+	}()
+	_ = a == b
+	<-ch
+}
+
+func TestRaceIfaceCmpNil(t *testing.T) {
+	var a Writer
+	a = DummyWriter{1}
+	ch := make(chan bool, 1)
+	go func() {
+		a = DummyWriter{1}
+		ch <- true
+	}()
+	_ = a == nil
+	<-ch
 }
 
 func TestRaceEfaceConv(t *testing.T) {
@@ -874,8 +1182,7 @@ func TestRaceAnd(t *testing.T) {
 	<-c
 }
 
-// OANDAND is not instrumented in the compiler.
-func TestRaceFailingAnd2(t *testing.T) {
+func TestRaceAnd2(t *testing.T) {
 	c := make(chan bool)
 	x, y := 0, 0
 	go func() {
@@ -911,8 +1218,7 @@ func TestRaceOr(t *testing.T) {
 	<-c
 }
 
-// OOROR is not instrumented in the compiler.
-func TestRaceFailingOr2(t *testing.T) {
+func TestRaceOr2(t *testing.T) {
 	c := make(chan bool)
 	x, y := 0, 0
 	go func() {
@@ -1057,6 +1363,15 @@ func (p InterImpl) Foo(x int) {
 	_, _, _ = x, y, z
 }
 
+type InterImpl2 InterImpl
+
+func (p *InterImpl2) Foo(x int) {
+	if p == nil {
+		InterImpl{}.Foo(x)
+	}
+	InterImpl(*p).Foo(x)
+}
+
 func TestRaceInterCall(t *testing.T) {
 	c := make(chan bool, 1)
 	p := InterImpl{}
@@ -1115,6 +1430,54 @@ func TestRaceMethodCall2(t *testing.T) {
 		c <- true
 	}()
 	i.Foo(0)
+	<-c
+}
+
+// Method value with concrete value receiver.
+func TestRaceMethodValue(t *testing.T) {
+	c := make(chan bool, 1)
+	i := InterImpl{}
+	go func() {
+		i = InterImpl{}
+		c <- true
+	}()
+	_ = i.Foo
+	<-c
+}
+
+// Method value with interface receiver.
+func TestRaceMethodValue2(t *testing.T) {
+	c := make(chan bool, 1)
+	var i Inter = InterImpl{}
+	go func() {
+		i = InterImpl{}
+		c <- true
+	}()
+	_ = i.Foo
+	<-c
+}
+
+// Method value with implicit dereference.
+func TestRaceMethodValue3(t *testing.T) {
+	c := make(chan bool, 1)
+	i := &InterImpl{}
+	go func() {
+		*i = InterImpl{}
+		c <- true
+	}()
+	_ = i.Foo // dereferences i.
+	<-c
+}
+
+// Method value implicitly taking receiver address.
+func TestNoRaceMethodValue(t *testing.T) {
+	c := make(chan bool, 1)
+	i := InterImpl2{}
+	go func() {
+		i = InterImpl2{}
+		c <- true
+	}()
+	_ = i.Foo // takes the address of i only.
 	<-c
 }
 
@@ -1244,8 +1607,18 @@ func TestRaceSliceSlice2(t *testing.T) {
 	<-c
 }
 
-// http://golang.org/issue/4453
-func TestRaceFailingSliceStruct(t *testing.T) {
+func TestRaceSliceString(t *testing.T) {
+	c := make(chan bool, 1)
+	x := "hello"
+	go func() {
+		x = "world"
+		c <- true
+	}()
+	_ = x[2:3]
+	<-c
+}
+
+func TestRaceSliceStruct(t *testing.T) {
 	type X struct {
 		x, y int
 	}
@@ -1254,6 +1627,21 @@ func TestRaceFailingSliceStruct(t *testing.T) {
 	go func() {
 		y := make([]X, 10)
 		copy(y, x)
+		c <- true
+	}()
+	x[1].y = 42
+	<-c
+}
+
+func TestRaceAppendSliceStruct(t *testing.T) {
+	type X struct {
+		x, y int
+	}
+	c := make(chan bool, 1)
+	x := make([]X, 10)
+	go func() {
+		y := make([]X, 0, 10)
+		y = append(y, x...)
 		c <- true
 	}()
 	x[1].y = 42
@@ -1381,4 +1769,189 @@ func TestRaceNestedStruct(t *testing.T) {
 	}()
 	y.x.y = 42
 	<-c
+}
+
+func TestRaceIssue5567(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
+	in := make(chan []byte)
+	res := make(chan error)
+	go func() {
+		var err error
+		defer func() {
+			close(in)
+			res <- err
+		}()
+		path := "mop_test.go"
+		f, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		var n, total int
+		b := make([]byte, 17) // the race is on b buffer
+		for err == nil {
+			n, err = f.Read(b)
+			total += n
+			if n > 0 {
+				in <- b[:n]
+			}
+		}
+		if err == io.EOF {
+			err = nil
+		}
+	}()
+	h := sha1.New()
+	for b := range in {
+		h.Write(b)
+	}
+	_ = h.Sum(nil)
+	err := <-res
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRaceIssue5654(t *testing.T) {
+	text := `Friends, Romans, countrymen, lend me your ears;
+I come to bury Caesar, not to praise him.
+The evil that men do lives after them;
+The good is oft interred with their bones;
+So let it be with Caesar. The noble Brutus
+Hath told you Caesar was ambitious:
+If it were so, it was a grievous fault,
+And grievously hath Caesar answer'd it.
+Here, under leave of Brutus and the rest -
+For Brutus is an honourable man;
+So are they all, all honourable men -
+Come I to speak in Caesar's funeral.
+He was my friend, faithful and just to me:
+But Brutus says he was ambitious;
+And Brutus is an honourable man.`
+
+	data := bytes.NewBufferString(text)
+	in := make(chan []byte)
+
+	go func() {
+		buf := make([]byte, 16)
+		var n int
+		var err error
+		for ; err == nil; n, err = data.Read(buf) {
+			in <- buf[:n]
+		}
+		close(in)
+	}()
+	res := ""
+	for s := range in {
+		res += string(s)
+	}
+	_ = res
+}
+
+type Base int
+
+func (b *Base) Foo() int {
+	return 42
+}
+
+func (b Base) Bar() int {
+	return int(b)
+}
+
+func TestNoRaceMethodThunk(t *testing.T) {
+	type Derived struct {
+		pad int
+		Base
+	}
+	var d Derived
+	done := make(chan bool)
+	go func() {
+		_ = d.Foo()
+		done <- true
+	}()
+	d = Derived{}
+	<-done
+}
+
+func TestRaceMethodThunk(t *testing.T) {
+	type Derived struct {
+		pad int
+		*Base
+	}
+	var d Derived
+	done := make(chan bool)
+	go func() {
+		_ = d.Foo()
+		done <- true
+	}()
+	d = Derived{}
+	<-done
+}
+
+func TestRaceMethodThunk2(t *testing.T) {
+	type Derived struct {
+		pad int
+		Base
+	}
+	var d Derived
+	done := make(chan bool)
+	go func() {
+		_ = d.Bar()
+		done <- true
+	}()
+	d = Derived{}
+	<-done
+}
+
+func TestRaceMethodThunk3(t *testing.T) {
+	type Derived struct {
+		pad int
+		*Base
+	}
+	var d Derived
+	d.Base = new(Base)
+	done := make(chan bool)
+	go func() {
+		_ = d.Bar()
+		done <- true
+	}()
+	d.Base = new(Base)
+	<-done
+}
+
+func TestRaceMethodThunk4(t *testing.T) {
+	type Derived struct {
+		pad int
+		*Base
+	}
+	var d Derived
+	d.Base = new(Base)
+	done := make(chan bool)
+	go func() {
+		_ = d.Bar()
+		done <- true
+	}()
+	*(*int)(d.Base) = 42
+	<-done
+}
+
+func TestNoRaceTinyAlloc(t *testing.T) {
+	const P = 4
+	const N = 1e6
+	var tinySink *byte
+	done := make(chan bool)
+	for p := 0; p < P; p++ {
+		go func() {
+			for i := 0; i < N; i++ {
+				var b byte
+				if b != 0 {
+					tinySink = &b // make it heap allocated
+				}
+				b = 42
+			}
+			done <- true
+		}()
+	}
+	for p := 0; p < P; p++ {
+		<-done
+	}
 }

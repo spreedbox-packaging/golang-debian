@@ -37,13 +37,12 @@ static void imported(char *pkg, char *import);
 static int
 hashstr(char *name)
 {
-	int h;
+	uint32 h;
 	char *cp;
 
 	h = 0;
 	for(cp = name; *cp; h += *cp++)
 		h *= 1119;
-	// not if(h < 0) h = ~h, because gcc 4.3 -O2 miscompiles it.
 	h &= 0xffffff;
 	return h;
 }
@@ -59,7 +58,7 @@ ilookup(char *name)
 		if(x->name[0] == name[0] && strcmp(x->name, name) == 0)
 			return x;
 	x = mal(sizeof *x);
-	x->name = strdup(name);
+	x->name = estrdup(name);
 	x->hash = ihash[h];
 	ihash[h] = x;
 	nimport++;
@@ -67,13 +66,9 @@ ilookup(char *name)
 }
 
 static void loadpkgdata(char*, char*, char*, int);
-static void loaddynimport(char*, char*, char*, int);
-static void loaddynexport(char*, char*, char*, int);
-static void loaddynlinker(char*, char*, char*, int);
+static void loadcgo(char*, char*, char*, int);
 static int parsemethod(char**, char*, char**);
 static int parsepkgdata(char*, char*, char**, char*, char**, char**, char**);
-
-static Sym **dynexp;
 
 void
 ldpkg(Biobuf *f, char *pkg, int64 len, char *filename, int whence)
@@ -156,34 +151,17 @@ ldpkg(Biobuf *f, char *pkg, int64 len, char *filename, int whence)
 		}
 		loadpkgdata(filename, pkg, p0, p1 - p0);
 	}
-
-	// The __.PKGDEF archive summary has no local types.
+	
+	// __.PKGDEF has no cgo section - those are in the C compiler-generated object files.
 	if(whence == Pkgdef)
 		return;
 
-	// local types begin where exports end.
-	// skip rest of line after $$ we found above
-	p0 = p1 + 3;
-	while(*p0 != '\n' && *p0 != '\0')
-		p0++;
-
-	// local types end at next \n$$.
-	p1 = strstr(p0, "\n$$");
-	if(p1 == nil) {
-		fprint(2, "%s: cannot find end of local types in %s\n", argv0, filename);
-		if(debug['u'])
-			errorexit();
-		return;
-	}
-
-	loadpkgdata(filename, pkg, p0, p1 - p0);
-
-	// look for dynimport section
-	p0 = strstr(p1, "\n$$  // dynimport");
+	// look for cgo section
+	p0 = strstr(p1, "\n$$  // cgo");
 	if(p0 != nil) {
 		p0 = strchr(p0+1, '\n');
 		if(p0 == nil) {
-			fprint(2, "%s: found $$ // dynimport but no newline in %s\n", argv0, filename);
+			fprint(2, "%s: found $$ // cgo but no newline in %s\n", argv0, filename);
 			if(debug['u'])
 				errorexit();
 			return;
@@ -192,55 +170,12 @@ ldpkg(Biobuf *f, char *pkg, int64 len, char *filename, int whence)
 		if(p1 == nil)
 			p1 = strstr(p0, "\n!\n");
 		if(p1 == nil) {
-			fprint(2, "%s: cannot find end of // dynimport section in %s\n", argv0, filename);
+			fprint(2, "%s: cannot find end of // cgo section in %s\n", argv0, filename);
 			if(debug['u'])
 				errorexit();
 			return;
 		}
-		loaddynimport(filename, pkg, p0 + 1, p1 - (p0+1));
-	}
-
-	// look for dynexp section
-	p0 = strstr(p1, "\n$$  // dynexport");
-	if(p0 != nil) {
-		p0 = strchr(p0+1, '\n');
-		if(p0 == nil) {
-			fprint(2, "%s: found $$ // dynexport but no newline in %s\n", argv0, filename);
-			if(debug['u'])
-				errorexit();
-			return;
-		}
-		p1 = strstr(p0, "\n$$");
-		if(p1 == nil)
-			p1 = strstr(p0, "\n!\n");
-		if(p1 == nil) {
-			fprint(2, "%s: cannot find end of // dynexport section in %s\n", argv0, filename);
-			if(debug['u'])
-				errorexit();
-			return;
-		}
-		loaddynexport(filename, pkg, p0 + 1, p1 - (p0+1));
-	}
-
-	p0 = strstr(p1, "\n$$  // dynlinker");
-	if(p0 != nil) {
-		p0 = strchr(p0+1, '\n');
-		if(p0 == nil) {
-			fprint(2, "%s: found $$ // dynlinker but no newline in %s\n", argv0, filename);
-			if(debug['u'])
-				errorexit();
-			return;
-		}
-		p1 = strstr(p0, "\n$$");
-		if(p1 == nil)
-			p1 = strstr(p0, "\n!\n");
-		if(p1 == nil) {
-			fprint(2, "%s: cannot find end of // dynlinker section in %s\n", argv0, filename);
-			if(debug['u'])
-				errorexit();
-			return;
-		}
-		loaddynlinker(filename, pkg, p0 + 1, p1 - (p0+1));
+		loadcgo(filename, pkg, p0 + 1, p1 - (p0+1));
 	}
 }
 
@@ -250,14 +185,14 @@ loadpkgdata(char *file, char *pkg, char *data, int len)
 	char *p, *ep, *prefix, *name, *def;
 	Import *x;
 
-	file = strdup(file);
+	file = estrdup(file);
 	p = data;
 	ep = data + len;
 	while(parsepkgdata(file, pkg, &p, ep, &prefix, &name, &def) > 0) {
 		x = ilookup(name);
 		if(x->prefix == nil) {
 			x->prefix = prefix;
-			x->def = strdup(def);
+			x->def = estrdup(def);
 			x->file = file;
 		} else if(strcmp(x->prefix, prefix) != 0) {
 			fprint(2, "%s: conflicting definitions for %s\n", argv0, name);
@@ -274,39 +209,6 @@ loadpkgdata(char *file, char *pkg, char *data, int len)
 		free(def);
 	}
 	free(file);
-}
-
-// replace all "". with pkg.
-char*
-expandpkg(char *t0, char *pkg)
-{
-	int n;
-	char *p;
-	char *w, *w0, *t;
-
-	n = 0;
-	for(p=t0; (p=strstr(p, "\"\".")) != nil; p+=3)
-		n++;
-
-	if(n == 0)
-		return strdup(t0);
-
-	// use malloc, not mal, so that caller can free
-	w0 = malloc(strlen(t0) + strlen(pkg)*n);
-	if(w0 == nil) {
-		diag("out of memory");
-		errorexit();
-	}
-	w = w0;
-	for(p=t=t0; (p=strstr(p, "\"\".")) != nil; p=t) {
-		memmove(w, t, p - t);
-		w += p-t;
-		strcpy(w, pkg);
-		w += strlen(pkg);
-		t = p+2;
-	}
-	strcpy(w, t);
-	return w0;
 }
 
 static int
@@ -456,69 +358,153 @@ useline:
 }
 
 static void
-loaddynimport(char *file, char *pkg, char *p, int n)
+loadcgo(char *file, char *pkg, char *p, int n)
 {
-	char *pend, *next, *name, *def, *p0, *lib, *q;
-	Sym *s;
+	char *pend, *next, *p0, *q;
+	char *f[10], *local, *remote, *lib;
+	int nf;
+	LSym *s;
 
 	USED(file);
 	pend = p + n;
+	p0 = nil;
 	for(; p<pend; p=next) {
 		next = strchr(p, '\n');
 		if(next == nil)
 			next = "";
 		else
 			*next++ = '\0';
-		p0 = p;
-		if(strncmp(p, "dynimport ", 10) != 0)
-			goto err;
-		p += 10;
-		name = p;
-		p = strchr(name, ' ');
-		if(p == nil)
-			goto err;
-		while(*p == ' ')
-			p++;
-		def = p;
-		p = strchr(def, ' ');
-		if(p == nil)
-			goto err;
-		while(*p == ' ')
-			p++;
-		lib = p;
 
-		// successful parse: now can edit the line
-		*strchr(name, ' ') = 0;
-		*strchr(def, ' ') = 0;
+		free(p0);
+		p0 = estrdup(p); // save for error message
+		nf = tokenize(p, f, nelem(f));
 		
-		if(debug['d']) {
-			fprint(2, "%s: %s: cannot use dynamic imports with -d flag\n", argv0, file);
-			nerrors++;
-			return;
+		if(strcmp(f[0], "cgo_import_dynamic") == 0) {
+			if(nf < 2 || nf > 4)
+				goto err;
+			
+			local = f[1];
+			remote = local;
+			if(nf > 2)
+				remote = f[2];
+			lib = "";
+			if(nf > 3)
+				lib = f[3];
+			
+			if(debug['d']) {
+				fprint(2, "%s: %s: cannot use dynamic imports with -d flag\n", argv0, file);
+				nerrors++;
+				return;
+			}
+		
+			if(strcmp(local, "_") == 0 && strcmp(remote, "_") == 0) {
+				// allow #pragma dynimport _ _ "foo.so"
+				// to force a link of foo.so.
+				havedynamic = 1;
+				adddynlib(lib);
+				continue;
+			}
+
+			local = expandpkg(local, pkg);
+			q = strchr(remote, '#');
+			if(q)
+				*q++ = '\0';
+			s = linklookup(ctxt, local, 0);
+			if(local != f[1])
+				free(local);
+			if(s->type == 0 || s->type == SXREF || s->type == SHOSTOBJ) {
+				s->dynimplib = lib;
+				s->extname = remote;
+				s->dynimpvers = q;
+				if(s->type != SHOSTOBJ)
+					s->type = SDYNIMPORT;
+				havedynamic = 1;
+			}
+			continue;
 		}
 		
-		if(strcmp(name, "_") == 0 && strcmp(def, "_") == 0) {
-			// allow #pragma dynimport _ _ "foo.so"
-			// to force a link of foo.so.
-			havedynamic = 1;
-			adddynlib(lib);
+		if(strcmp(f[0], "cgo_import_static") == 0) {
+			if(nf != 2)
+				goto err;
+			local = f[1];
+			s = linklookup(ctxt, local, 0);
+			s->type = SHOSTOBJ;
+			s->size = 0;
 			continue;
 		}
 
-		name = expandpkg(name, pkg);
-		q = strchr(def, '#');
-		if(q)
-			*q++ = '\0';
-		s = lookup(name, 0);
-		free(name);
-		if(s->type == 0 || s->type == SXREF) {
-			s->dynimplib = lib;
-			s->dynimpname = def;
-			s->dynimpvers = q;
-			s->type = SDYNIMPORT;
-			havedynamic = 1;
+		if(strcmp(f[0], "cgo_export_static") == 0 || strcmp(f[0], "cgo_export_dynamic") == 0) {
+			// TODO: Remove once we know Windows is okay.
+			if(strcmp(f[0], "cgo_export_static") == 0 && HEADTYPE == Hwindows)
+				continue;
+
+			if(nf < 2 || nf > 3)
+				goto err;
+			local = f[1];
+			if(nf > 2)
+				remote = f[2];
+			else
+				remote = local;
+			local = expandpkg(local, pkg);
+			s = linklookup(ctxt, local, 0);
+
+			if(flag_shared && s == linklookup(ctxt, "main", 0))
+				continue;
+
+			// export overrides import, for openbsd/cgo.
+			// see issue 4878.
+			if(s->dynimplib != nil) {
+				s->dynimplib = nil;
+				s->extname = nil;
+				s->dynimpvers = nil;
+				s->type = 0;
+			}
+
+			if(s->cgoexport == 0) {
+				s->extname = remote;
+				if(ndynexp%32 == 0)
+					dynexp = erealloc(dynexp, (ndynexp+32)*sizeof dynexp[0]);
+				dynexp[ndynexp++] = s;
+			} else if(strcmp(s->extname, remote) != 0) {
+				fprint(2, "%s: conflicting cgo_export directives: %s as %s and %s\n", argv0, s->name, s->extname, remote);
+				nerrors++;
+				return;
+			}
+			if(strcmp(f[0], "cgo_export_static") == 0)
+				s->cgoexport |= CgoExportStatic;
+			else
+				s->cgoexport |= CgoExportDynamic;
+			if(local != f[1])
+				free(local);
+			continue;
+		}
+		
+		if(strcmp(f[0], "cgo_dynamic_linker") == 0) {
+			if(nf != 2)
+				goto err;
+			
+			if(!debug['I']) { // not overridden by command line
+				if(interpreter != nil && strcmp(interpreter, f[1]) != 0) {
+					fprint(2, "%s: conflict dynlinker: %s and %s\n", argv0, interpreter, f[1]);
+					nerrors++;
+					return;
+				}
+				free(interpreter);
+				interpreter = estrdup(f[1]);
+			}
+			continue;
+		}
+		
+		if(strcmp(f[0], "cgo_ldflag") == 0) {
+			if(nf != 2)
+				goto err;
+			if(nldflag%32 == 0)
+				ldflag = erealloc(ldflag, (nldflag+32)*sizeof ldflag[0]);
+			ldflag[nldflag++] = estrdup(f[1]);
+			continue;
 		}
 	}
+	free(p0);
 	return;
 
 err:
@@ -526,103 +512,11 @@ err:
 	nerrors++;
 }
 
-static void
-loaddynexport(char *file, char *pkg, char *p, int n)
-{
-	char *pend, *next, *local, *elocal, *remote, *p0;
-	Sym *s;
-
-	USED(file);
-	pend = p + n;
-	for(; p<pend; p=next) {
-		next = strchr(p, '\n');
-		if(next == nil)
-			next = "";
-		else
-			*next++ = '\0';
-		p0 = p;
-		if(strncmp(p, "dynexport ", 10) != 0)
-			goto err;
-		p += 10;
-		local = p;
-		p = strchr(local, ' ');
-		if(p == nil)
-			goto err;
-		while(*p == ' ')
-			p++;
-		remote = p;
-
-		// successful parse: now can edit the line
-		*strchr(local, ' ') = 0;
-
-		elocal = expandpkg(local, pkg);
-
-		s = lookup(elocal, 0);
-		if(s->dynimplib != nil) {
-			fprint(2, "%s: symbol is both dynimport and dynexport %s\n", argv0, local);
-			nerrors++;
-		}
-		s->dynimpname = remote;
-		s->dynexport = 1;
-
-		if(ndynexp%32 == 0)
-			dynexp = realloc(dynexp, (ndynexp+32)*sizeof dynexp[0]);
-		dynexp[ndynexp++] = s;
-
-		if (elocal != local)
-			free(elocal);
-	}
-	return;
-
-err:
-	fprint(2, "%s: invalid dynexport line: %s\n", argv0, p0);
-	nerrors++;
-}
+static LSym *markq;
+static LSym *emarkq;
 
 static void
-loaddynlinker(char *file, char *pkg, char *p, int n)
-{
-	char *pend, *next, *dynlinker, *p0;
-
-	USED(file);
-	USED(pkg);
-	pend = p + n;
-	for(; p<pend; p=next) {
-		next = strchr(p, '\n');
-		if(next == nil)
-			next = "";
-		else
-			*next++ = '\0';
-		p0 = p;
-		if(strncmp(p, "dynlinker ", 10) != 0)
-			goto err;
-		p += 10;
-		dynlinker = p;
-
-		if(*dynlinker == '\0')
-			goto err;
-		if(!debug['I']) { // not overrided by cmdline
-			if(interpreter != nil && strcmp(interpreter, dynlinker) != 0) {
-				fprint(2, "%s: conflict dynlinker: %s and %s\n", argv0, interpreter, dynlinker);
-				nerrors++;
-				return;
-			}
-			free(interpreter);
-			interpreter = strdup(dynlinker);
-		}
-	}
-	return;
-
-err:
-	fprint(2, "%s: invalid dynlinker line: %s\n", argv0, p0);
-	nerrors++;
-}
-
-static Sym *markq;
-static Sym *emarkq;
-
-static void
-mark1(Sym *s, Sym *parent)
+mark1(LSym *s, LSym *parent)
 {
 	if(s == S || s->reachable)
 		return;
@@ -638,7 +532,7 @@ mark1(Sym *s, Sym *parent)
 }
 
 void
-mark(Sym *s)
+mark(LSym *s)
 {
 	mark1(s, nil);
 }
@@ -647,23 +541,22 @@ static void
 markflood(void)
 {
 	Auto *a;
-	Prog *p;
-	Sym *s;
+	LSym *s;
 	int i;
 	
 	for(s=markq; s!=S; s=s->queue) {
-		if(s->text) {
+		if(s->type == STEXT) {
 			if(debug['v'] > 1)
 				Bprint(&bso, "marktext %s\n", s->name);
 			for(a=s->autom; a; a=a->link)
 				mark1(a->gotype, s);
-			for(p=s->text; p != P; p=p->link) {
-				mark1(p->from.sym, s);
-				mark1(p->to.sym, s);
-			}
 		}
 		for(i=0; i<s->nr; i++)
 			mark1(s->r[i].sym, s);
+		if(s->pcln) {
+			for(i=0; i<s->pcln->nfuncdata; i++)
+				mark1(s->pcln->funcdata[i], s);
+		}
 		mark1(s->gotype, s);
 		mark1(s->sub, s);
 		mark1(s->outer, s);
@@ -671,7 +564,7 @@ markflood(void)
 }
 
 static char*
-morename[] =
+markextra[] =
 {
 	"runtime.morestack",
 	"runtime.morestackx",
@@ -687,55 +580,27 @@ morename[] =
 	"runtime.morestack32",
 	"runtime.morestack40",
 	"runtime.morestack48",
+	
+	// on arm, lock in the div/mod helpers too
+	"_div",
+	"_divu",
+	"_mod",
+	"_modu",
 };
-
-static int
-isz(Auto *a)
-{
-	for(; a; a=a->link)
-		if(a->type == D_FILE || a->type == D_FILE1)
-			return 1;
-	return 0;
-}
-
-static void
-addz(Sym *s, Auto *z)
-{
-	Auto *a, *last;
-
-	// strip out non-z
-	last = nil;
-	for(a = z; a != nil; a = a->link) {
-		if(a->type == D_FILE || a->type == D_FILE1) {
-			if(last == nil)
-				z = a;
-			else
-				last->link = a;
-			last = a;
-		}
-	}
-	if(last) {
-		last->link = s->autom;
-		s->autom = z;
-	}
-}
 
 void
 deadcode(void)
 {
 	int i;
-	Sym *s, *last, *p;
-	Auto *z;
+	LSym *s, *last, *p;
 	Fmt fmt;
 
 	if(debug['v'])
 		Bprint(&bso, "%5.2f deadcode\n", cputime());
 
-	mark(lookup(INITENTRY, 0));
-	if(flag_shared)
-		mark(lookup(LIBINITENTRY, 0));
-	for(i=0; i<nelem(morename); i++)
-		mark(lookup(morename[i], 0));
+	mark(linklookup(ctxt, INITENTRY, 0));
+	for(i=0; i<nelem(markextra); i++)
+		mark(linklookup(ctxt, markextra[i], 0));
 
 	for(i=0; i<ndynexp; i++)
 		mark(dynexp[i]);
@@ -743,37 +608,29 @@ deadcode(void)
 	markflood();
 	
 	// keep each beginning with 'typelink.' if the symbol it points at is being kept.
-	for(s = allsym; s != S; s = s->allsym) {
+	for(s = ctxt->allsym; s != S; s = s->allsym) {
 		if(strncmp(s->name, "go.typelink.", 12) == 0)
 			s->reachable = s->nr==1 && s->r[0].sym->reachable;
 	}
 
 	// remove dead text but keep file information (z symbols).
 	last = nil;
-	z = nil;
-	for(s = textp; s != nil; s = s->next) {
-		if(!s->reachable) {
-			if(isz(s->autom))
-				z = s->autom;
+	for(s = ctxt->textp; s != nil; s = s->next) {
+		if(!s->reachable)
 			continue;
-		}
+		// NOTE: Removing s from old textp and adding to new, shorter textp.
 		if(last == nil)
-			textp = s;
+			ctxt->textp = s;
 		else
 			last->next = s;
 		last = s;
-		if(z != nil) {
-			if(!isz(s->autom))
-				addz(s, z);
-			z = nil;
-		}
 	}
 	if(last == nil)
-		textp = nil;
+		ctxt->textp = nil;
 	else
 		last->next = nil;
 	
-	for(s = allsym; s != S; s = s->allsym)
+	for(s = ctxt->allsym; s != S; s = s->allsym)
 		if(strncmp(s->name, "go.weak.", 8) == 0) {
 			s->special = 1;  // do not lay out in data segment
 			s->reachable = 1;
@@ -782,7 +639,7 @@ deadcode(void)
 	
 	// record field tracking references
 	fmtstrinit(&fmt);
-	for(s = allsym; s != S; s = s->allsym) {
+	for(s = ctxt->allsym; s != S; s = s->allsym) {
 		if(strncmp(s->name, "go.track.", 9) == 0) {
 			s->special = 1;  // do not lay out in data segment
 			s->hide = 1;
@@ -798,7 +655,7 @@ deadcode(void)
 	}
 	if(tracksym == nil)
 		return;
-	s = lookup(tracksym, 0);
+	s = linklookup(ctxt, tracksym, 0);
 	if(!s->reachable)
 		return;
 	addstrdata(tracksym, fmtstrflush(&fmt));
@@ -807,13 +664,13 @@ deadcode(void)
 void
 doweak(void)
 {
-	Sym *s, *t;
+	LSym *s, *t;
 
 	// resolve weak references only if
 	// target symbol will be in binary anyway.
-	for(s = allsym; s != S; s = s->allsym) {
+	for(s = ctxt->allsym; s != S; s = s->allsym) {
 		if(strncmp(s->name, "go.weak.", 8) == 0) {
-			t = rlookup(s->name+8, s->version);
+			t = linkrlookup(ctxt, s->name+8, s->version);
 			if(t && t->type != 0 && t->reachable) {
 				s->value = t->value;
 				s->type = t->type;
@@ -832,8 +689,11 @@ addexport(void)
 {
 	int i;
 	
+	if(HEADTYPE == Hdarwin)
+		return;
+
 	for(i=0; i<ndynexp; i++)
-		adddynsym(dynexp[i]);
+		adddynsym(ctxt, dynexp[i]);
 }
 
 /* %Z from gc, for quoting import paths */
@@ -849,6 +709,8 @@ Zconv(Fmt *fp)
 		return fmtstrcpy(fp, "<nil>");
 
 	se = s + strlen(s);
+
+	// NOTE: Keep in sync with ../gc/go.c:/^Zconv.
 	while(s < se) {
 		n = chartorune(&r, s);
 		s += n;
@@ -876,6 +738,9 @@ Zconv(Fmt *fp)
 		case '\\':
 			fmtrune(fp, '\\');
 			fmtrune(fp, r);
+			break;
+		case 0xFEFF: // BOM, basically disallowed in source code
+			fmtstrcpy(fp, "\\uFEFF");
 			break;
 		}
 	}
@@ -910,7 +775,7 @@ getpkg(char *path)
 		if(strcmp(p->path, path) == 0)
 			return p;
 	p = mal(sizeof *p);
-	p->path = strdup(path);
+	p->path = estrdup(path);
 	p->next = phash[h];
 	phash[h] = p;
 	p->all = pkgall;
@@ -934,7 +799,7 @@ imported(char *pkg, char *import)
 		i->mimpby *= 2;
 		if(i->mimpby == 0)
 			i->mimpby = 16;
-		i->impby = realloc(i->impby, i->mimpby*sizeof i->impby[0]);
+		i->impby = erealloc(i->impby, i->mimpby*sizeof i->impby[0]);
 	}
 	i->impby[i->nimpby++] = p;
 	free(pkg);
@@ -980,27 +845,17 @@ importcycles(void)
 		cycle(p);
 }
 
-static int
-scmp(const void *p1, const void *p2)
-{
-	Sym *s1, *s2;
-
-	s1 = *(Sym**)p1;
-	s2 = *(Sym**)p2;
-	return strcmp(s1->dynimpname, s2->dynimpname);
-}
 void
-sortdynexp(void)
+setlinkmode(char *arg)
 {
-	int i;
-
-	// On Mac OS X Mountain Lion, we must sort exported symbols
-	// So we sort them here and pre-allocate dynid for them
-	// See http://golang.org/issue/4029
-	if(HEADTYPE != Hdarwin)
-		return;
-	qsort(dynexp, ndynexp, sizeof dynexp[0], scmp);
-	for(i=0; i<ndynexp; i++) {
-		dynexp[i]->dynid = -i-100; // also known to [68]l/asm.c:^adddynsym
+	if(strcmp(arg, "internal") == 0)
+		linkmode = LinkInternal;
+	else if(strcmp(arg, "external") == 0)
+		linkmode = LinkExternal;
+	else if(strcmp(arg, "auto") == 0)
+		linkmode = LinkAuto;
+	else {
+		fprint(2, "unknown link mode -linkmode %s\n", arg);
+		errorexit();
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,7 +114,7 @@ func TestDecode(t *testing.T) {
 
 func TestDecoder(t *testing.T) {
 	for _, p := range pairs {
-		decoder := NewDecoder(StdEncoding, bytes.NewBufferString(p.encoded))
+		decoder := NewDecoder(StdEncoding, strings.NewReader(p.encoded))
 		dbuf := make([]byte, StdEncoding.DecodedLen(len(p.encoded)))
 		count, err := decoder.Read(dbuf)
 		if err != nil && err != io.EOF {
@@ -129,7 +131,7 @@ func TestDecoder(t *testing.T) {
 
 func TestDecoderBuffering(t *testing.T) {
 	for bs := 1; bs <= 12; bs++ {
-		decoder := NewDecoder(StdEncoding, bytes.NewBufferString(bigtest.encoded))
+		decoder := NewDecoder(StdEncoding, strings.NewReader(bigtest.encoded))
 		buf := make([]byte, len(bigtest.decoded)+12)
 		var total int
 		for total = 0; total < len(bigtest.decoded); {
@@ -142,30 +144,44 @@ func TestDecoderBuffering(t *testing.T) {
 }
 
 func TestDecodeCorrupt(t *testing.T) {
-	type corrupt struct {
-		e string
-		p int
-	}
-	examples := []corrupt{
+	testCases := []struct {
+		input  string
+		offset int // -1 means no corruption.
+	}{
+		{"", -1},
 		{"!!!!", 0},
+		{"====", 0},
 		{"x===", 1},
+		{"=AAA", 0},
+		{"A=AA", 1},
 		{"AA=A", 2},
-		{"AAA=AAAA", 3},
+		{"AA==A", 4},
+		{"AAA=AAAA", 4},
 		{"AAAAA", 4},
 		{"AAAAAA", 4},
 		{"A=", 1},
+		{"A==", 1},
 		{"AA=", 3},
+		{"AA==", -1},
+		{"AAA=", -1},
+		{"AAAA", -1},
 		{"AAAAAA=", 7},
+		{"YWJjZA=====", 8},
 	}
-
-	for _, e := range examples {
-		dbuf := make([]byte, StdEncoding.DecodedLen(len(e.e)))
-		_, err := StdEncoding.Decode(dbuf, []byte(e.e))
+	for _, tc := range testCases {
+		dbuf := make([]byte, StdEncoding.DecodedLen(len(tc.input)))
+		_, err := StdEncoding.Decode(dbuf, []byte(tc.input))
+		if tc.offset == -1 {
+			if err != nil {
+				t.Error("Decoder wrongly detected coruption in", tc.input)
+			}
+			continue
+		}
 		switch err := err.(type) {
 		case CorruptInputError:
-			testEqual(t, "Corruption in %q at offset %v, want %v", e.e, int(err), e.p)
+			testEqual(t, "Corruption in %q at offset %v, want %v", tc.input, int(err), tc.offset)
 		default:
-			t.Error("Decoder failed to detect corruption in", e)
+			t.Error("Decoder failed to detect corruption in", tc)
 		}
 	}
 }
@@ -216,6 +232,8 @@ func TestNewLineCharacters(t *testing.T) {
 		"c3V\nyZ\rQ==",
 		"c3VyZ\nQ==",
 		"c3VyZQ\n==",
+		"c3VyZQ=\n=",
+		"c3VyZQ=\r\n\r\n=",
 	}
 	for _, e := range examples {
 		buf, err := StdEncoding.DecodeString(e)
@@ -274,5 +292,53 @@ func TestDecoderIssue3577(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Errorf("timeout; Decoder blocked without returning an error")
+	}
+}
+
+func TestDecoderIssue4779(t *testing.T) {
+	encoded := `CP/EAT8AAAEF
+AQEBAQEBAAAAAAAAAAMAAQIEBQYHCAkKCwEAAQUBAQEBAQEAAAAAAAAAAQACAwQFBgcICQoLEAAB
+BAEDAgQCBQcGCAUDDDMBAAIRAwQhEjEFQVFhEyJxgTIGFJGhsUIjJBVSwWIzNHKC0UMHJZJT8OHx
+Y3M1FqKygyZEk1RkRcKjdDYX0lXiZfKzhMPTdePzRieUpIW0lcTU5PSltcXV5fVWZnaGlqa2xtbm
+9jdHV2d3h5ent8fX5/cRAAICAQIEBAMEBQYHBwYFNQEAAhEDITESBEFRYXEiEwUygZEUobFCI8FS
+0fAzJGLhcoKSQ1MVY3M08SUGFqKygwcmNcLSRJNUoxdkRVU2dGXi8rOEw9N14/NGlKSFtJXE1OT0
+pbXF1eX1VmZ2hpamtsbW5vYnN0dXZ3eHl6e3x//aAAwDAQACEQMRAD8A9VSSSSUpJJJJSkkkJ+Tj
+1kiy1jCJJDnAcCTykpKkuQ6p/jN6FgmxlNduXawwAzaGH+V6jn/R/wCt71zdn+N/qL3kVYFNYB4N
+ji6PDVjWpKp9TSXnvTf8bFNjg3qOEa2n6VlLpj/rT/pf567DpX1i6L1hs9Py67X8mqdtg/rUWbbf
++gkp0kkkklKSSSSUpJJJJT//0PVUkkklKVLq3WMDpGI7KzrNjADtYNXvI/Mqr/Pd/q9W3vaxjnvM
+NaCXE9gNSvGPrf8AWS3qmba5jjsJhoB0DAf0NDf6sevf+/lf8Hj0JJATfWT6/dV6oXU1uOLQeKKn
+EQP+Hubtfe/+R7Mf/g7f5xcocp++Z11JMCJPgFBxOg7/AOuqDx8I/ikpkXkmSdU8mJIJA/O8EMAy
+j+mSARB/17pKVXYWHXjsj7yIex0PadzXMO1zT5KHoNA3HT8ietoGhgjsfA+CSnvvqh/jJtqsrwOv
+2b6NGNzXfTYexzJ+nU7/ALkf4P8Awv6P9KvTQQ4AgyDqCF85Pho3CTB7eHwXoH+LT65uZbX9X+o2
+bqbPb06551Y4
+`
+	encodedShort := strings.Replace(encoded, "\n", "", -1)
+
+	dec := NewDecoder(StdEncoding, strings.NewReader(encoded))
+	res1, err := ioutil.ReadAll(dec)
+	if err != nil {
+		t.Errorf("ReadAll failed: %v", err)
+	}
+
+	dec = NewDecoder(StdEncoding, strings.NewReader(encodedShort))
+	var res2 []byte
+	res2, err = ioutil.ReadAll(dec)
+	if err != nil {
+		t.Errorf("ReadAll failed: %v", err)
+	}
+
+	if !bytes.Equal(res1, res2) {
+		t.Error("Decoded results not equal")
+	}
+}
+
+func TestDecoderIssue7733(t *testing.T) {
+	s, err := StdEncoding.DecodeString("YWJjZA=====")
+	want := CorruptInputError(8)
+	if !reflect.DeepEqual(want, err) {
+		t.Errorf("Error = %v; want CorruptInputError(8)", err)
+	}
+	if string(s) != "abcd" {
+		t.Errorf("DecodeString = %q; want abcd", s)
 	}
 }

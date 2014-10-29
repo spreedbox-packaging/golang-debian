@@ -10,18 +10,23 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	. "net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var robotsTxtHandler = HandlerFunc(func(w ResponseWriter, r *Request) {
@@ -51,11 +56,17 @@ func pedanticReadAll(r io.Reader) (b []byte, err error) {
 			return b, err
 		}
 	}
-	panic("unreachable")
+}
+
+type chanWriter chan string
+
+func (w chanWriter) Write(p []byte) (n int, err error) {
+	w <- string(p)
+	return len(p), nil
 }
 
 func TestClient(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(robotsTxtHandler)
 	defer ts.Close()
 
@@ -73,7 +84,7 @@ func TestClient(t *testing.T) {
 }
 
 func TestClientHead(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(robotsTxtHandler)
 	defer ts.Close()
 
@@ -96,7 +107,7 @@ func (t *recordingTransport) RoundTrip(req *Request) (resp *Response, err error)
 }
 
 func TestGetRequestFormat(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	tr := &recordingTransport{}
 	client := &Client{Transport: tr}
 	url := "http://dummy.faketld/"
@@ -113,7 +124,7 @@ func TestGetRequestFormat(t *testing.T) {
 }
 
 func TestPostRequestFormat(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	tr := &recordingTransport{}
 	client := &Client{Transport: tr}
 
@@ -140,7 +151,7 @@ func TestPostRequestFormat(t *testing.T) {
 }
 
 func TestPostFormRequestFormat(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	tr := &recordingTransport{}
 	client := &Client{Transport: tr}
 
@@ -181,8 +192,8 @@ func TestPostFormRequestFormat(t *testing.T) {
 	}
 }
 
-func TestRedirects(t *testing.T) {
-	defer checkLeakedTransports(t)
+func TestClientRedirects(t *testing.T) {
+	defer afterTest(t)
 	var ts *httptest.Server
 	ts = httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		n, _ := strconv.Atoi(r.FormValue("n"))
@@ -256,7 +267,7 @@ func TestRedirects(t *testing.T) {
 }
 
 func TestPostRedirects(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	var log struct {
 		sync.Mutex
 		bytes.Buffer
@@ -373,26 +384,8 @@ func (j *TestJar) Cookies(u *url.URL) []*Cookie {
 	return j.perURL[u.Host]
 }
 
-func TestRedirectCookiesOnRequest(t *testing.T) {
-	defer checkLeakedTransports(t)
-	var ts *httptest.Server
-	ts = httptest.NewServer(echoCookiesRedirectHandler)
-	defer ts.Close()
-	c := &Client{}
-	req, _ := NewRequest("GET", ts.URL, nil)
-	req.AddCookie(expectedCookies[0])
-	// TODO: Uncomment when an implementation of a RFC6265 cookie jar lands.
-	_ = c
-	// resp, _ := c.Do(req)
-	// matchReturnedCookies(t, expectedCookies, resp.Cookies())
-
-	req, _ = NewRequest("GET", ts.URL, nil)
-	// resp, _ = c.Do(req)
-	// matchReturnedCookies(t, expectedCookies[1:], resp.Cookies())
-}
-
 func TestRedirectCookiesJar(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	var ts *httptest.Server
 	ts = httptest.NewServer(echoCookiesRedirectHandler)
 	defer ts.Close()
@@ -410,8 +403,8 @@ func TestRedirectCookiesJar(t *testing.T) {
 }
 
 func matchReturnedCookies(t *testing.T, expected, given []*Cookie) {
-	t.Logf("Received cookies: %v", given)
 	if len(given) != len(expected) {
+		t.Logf("Received cookies: %v", given)
 		t.Errorf("Expected %d cookies, got %d", len(expected), len(given))
 	}
 	for _, ec := range expected {
@@ -429,7 +422,7 @@ func matchReturnedCookies(t *testing.T, expected, given []*Cookie) {
 }
 
 func TestJarCalls(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		pathSuffix := r.RequestURI[1:]
 		if r.RequestURI == "/nosetcookie" {
@@ -493,7 +486,7 @@ func (j *RecordingJar) logf(format string, args ...interface{}) {
 }
 
 func TestStreamingGet(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	say := make(chan string)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		w.(Flusher).Flush()
@@ -544,7 +537,7 @@ func (c *writeCountingConn) Write(p []byte) (int, error) {
 // TestClientWrites verifies that client requests are buffered and we
 // don't send a TCP packet per line of the http request + body.
 func TestClientWrites(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 	}))
 	defer ts.Close()
@@ -578,10 +571,12 @@ func TestClientWrites(t *testing.T) {
 }
 
 func TestClientInsecureTransport(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewTLSServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		w.Write([]byte("Hello"))
 	}))
+	errc := make(chanWriter, 10) // but only expecting 1
+	ts.Config.ErrorLog = log.New(errc, "", 0)
 	defer ts.Close()
 
 	// TODO(bradfitz): add tests for skipping hostname checks too?
@@ -603,10 +598,20 @@ func TestClientInsecureTransport(t *testing.T) {
 			res.Body.Close()
 		}
 	}
+
+	select {
+	case v := <-errc:
+		if !strings.Contains(v, "TLS handshake error") {
+			t.Errorf("expected an error log message containing 'TLS handshake error'; got %q", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("timeout waiting for logged error")
+	}
+
 }
 
 func TestClientErrorWithRequestURI(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	req, _ := NewRequest("GET", "http://localhost:1234/", nil)
 	req.RequestURI = "/this/field/is/illegal/and/should/error/"
 	_, err := DefaultClient.Do(req)
@@ -635,7 +640,7 @@ func newTLSTransport(t *testing.T, ts *httptest.Server) *Transport {
 }
 
 func TestClientWithCorrectTLSServerName(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewTLSServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		if r.TLS.ServerName != "127.0.0.1" {
 			t.Errorf("expected client to set ServerName 127.0.0.1, got: %q", r.TLS.ServerName)
@@ -650,9 +655,11 @@ func TestClientWithCorrectTLSServerName(t *testing.T) {
 }
 
 func TestClientWithIncorrectTLSServerName(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewTLSServer(HandlerFunc(func(w ResponseWriter, r *Request) {}))
 	defer ts.Close()
+	errc := make(chanWriter, 10) // but only expecting 1
+	ts.Config.ErrorLog = log.New(errc, "", 0)
 
 	trans := newTLSTransport(t, ts)
 	trans.TLSClientConfig.ServerName = "badserver"
@@ -664,11 +671,76 @@ func TestClientWithIncorrectTLSServerName(t *testing.T) {
 	if !strings.Contains(err.Error(), "127.0.0.1") || !strings.Contains(err.Error(), "badserver") {
 		t.Errorf("wanted error mentioning 127.0.0.1 and badserver; got error: %v", err)
 	}
+	select {
+	case v := <-errc:
+		if !strings.Contains(v, "TLS handshake error") {
+			t.Errorf("expected an error log message containing 'TLS handshake error'; got %q", v)
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("timeout waiting for logged error")
+	}
+}
+
+// Test for golang.org/issue/5829; the Transport should respect TLSClientConfig.ServerName
+// when not empty.
+//
+// tls.Config.ServerName (non-empty, set to "example.com") takes
+// precedence over "some-other-host.tld" which previously incorrectly
+// took precedence. We don't actually connect to (or even resolve)
+// "some-other-host.tld", though, because of the Transport.Dial hook.
+//
+// The httptest.Server has a cert with "example.com" as its name.
+func TestTransportUsesTLSConfigServerName(t *testing.T) {
+	defer afterTest(t)
+	ts := httptest.NewTLSServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		w.Write([]byte("Hello"))
+	}))
+	defer ts.Close()
+
+	tr := newTLSTransport(t, ts)
+	tr.TLSClientConfig.ServerName = "example.com" // one of httptest's Server cert names
+	tr.Dial = func(netw, addr string) (net.Conn, error) {
+		return net.Dial(netw, ts.Listener.Addr().String())
+	}
+	defer tr.CloseIdleConnections()
+	c := &Client{Transport: tr}
+	res, err := c.Get("https://some-other-host.tld/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+}
+
+func TestResponseSetsTLSConnectionState(t *testing.T) {
+	defer afterTest(t)
+	ts := httptest.NewTLSServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		w.Write([]byte("Hello"))
+	}))
+	defer ts.Close()
+
+	tr := newTLSTransport(t, ts)
+	tr.TLSClientConfig.CipherSuites = []uint16{tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA}
+	tr.Dial = func(netw, addr string) (net.Conn, error) {
+		return net.Dial(netw, ts.Listener.Addr().String())
+	}
+	defer tr.CloseIdleConnections()
+	c := &Client{Transport: tr}
+	res, err := c.Get("https://example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.TLS == nil {
+		t.Fatal("Response didn't set TLS Connection State.")
+	}
+	if got, want := res.TLS.CipherSuite, tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA; got != want {
+		t.Errorf("TLS Cipher Suite = %d; want %d", got, want)
+	}
 }
 
 // Verify Response.ContentLength is populated. http://golang.org/issue/4126
 func TestClientHeadContentLength(t *testing.T) {
-	defer checkLeakedTransports(t)
+	defer afterTest(t)
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		if v := r.FormValue("cl"); v != "" {
 			w.Header().Set("Content-Length", v)
@@ -699,5 +771,268 @@ func TestClientHeadContentLength(t *testing.T) {
 		if len(bs) != 0 {
 			t.Errorf("Unexpected content: %q", bs)
 		}
+	}
+}
+
+func TestEmptyPasswordAuth(t *testing.T) {
+	defer afterTest(t)
+	gopher := "gopher"
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Basic ") {
+			encoded := auth[6:]
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := gopher + ":"
+			s := string(decoded)
+			if expected != s {
+				t.Errorf("Invalid Authorization header. Got %q, wanted %q", s, expected)
+			}
+		} else {
+			t.Errorf("Invalid auth %q", auth)
+		}
+	}))
+	defer ts.Close()
+	c := &Client{}
+	req, err := NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.URL.User = url.User(gopher)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+}
+
+func TestBasicAuth(t *testing.T) {
+	defer afterTest(t)
+	tr := &recordingTransport{}
+	client := &Client{Transport: tr}
+
+	url := "http://My%20User:My%20Pass@dummy.faketld/"
+	expected := "My User:My Pass"
+	client.Get(url)
+
+	if tr.req.Method != "GET" {
+		t.Errorf("got method %q, want %q", tr.req.Method, "GET")
+	}
+	if tr.req.URL.String() != url {
+		t.Errorf("got URL %q, want %q", tr.req.URL.String(), url)
+	}
+	if tr.req.Header == nil {
+		t.Fatalf("expected non-nil request Header")
+	}
+	auth := tr.req.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Basic ") {
+		encoded := auth[6:]
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(decoded)
+		if expected != s {
+			t.Errorf("Invalid Authorization header. Got %q, wanted %q", s, expected)
+		}
+	} else {
+		t.Errorf("Invalid auth %q", auth)
+	}
+}
+
+func TestClientTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	defer afterTest(t)
+	sawRoot := make(chan bool, 1)
+	sawSlow := make(chan bool, 1)
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		if r.URL.Path == "/" {
+			sawRoot <- true
+			Redirect(w, r, "/slow", StatusFound)
+			return
+		}
+		if r.URL.Path == "/slow" {
+			w.Write([]byte("Hello"))
+			w.(Flusher).Flush()
+			sawSlow <- true
+			time.Sleep(2 * time.Second)
+			return
+		}
+	}))
+	defer ts.Close()
+	const timeout = 500 * time.Millisecond
+	c := &Client{
+		Timeout: timeout,
+	}
+
+	res, err := c.Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-sawRoot:
+		// good.
+	default:
+		t.Fatal("handler never got / request")
+	}
+
+	select {
+	case <-sawSlow:
+		// good.
+	default:
+		t.Fatal("handler never got /slow request")
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := ioutil.ReadAll(res.Body)
+		errc <- err
+		res.Body.Close()
+	}()
+
+	const failTime = timeout * 2
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Error("expected error from ReadAll")
+		}
+		// Expected error.
+	case <-time.After(failTime):
+		t.Errorf("timeout after %v waiting for timeout of %v", failTime, timeout)
+	}
+}
+
+func TestClientRedirectEatsBody(t *testing.T) {
+	defer afterTest(t)
+	saw := make(chan string, 2)
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		saw <- r.RemoteAddr
+		if r.URL.Path == "/" {
+			Redirect(w, r, "/foo", StatusFound) // which includes a body
+		}
+	}))
+	defer ts.Close()
+
+	res, err := Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ioutil.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	var first string
+	select {
+	case first = <-saw:
+	default:
+		t.Fatal("server didn't see a request")
+	}
+
+	var second string
+	select {
+	case second = <-saw:
+	default:
+		t.Fatal("server didn't see a second request")
+	}
+
+	if first != second {
+		t.Fatal("server saw different client ports before & after the redirect")
+	}
+}
+
+// eofReaderFunc is an io.Reader that runs itself, and then returns io.EOF.
+type eofReaderFunc func()
+
+func (f eofReaderFunc) Read(p []byte) (n int, err error) {
+	f()
+	return 0, io.EOF
+}
+
+func TestClientTrailers(t *testing.T) {
+	defer afterTest(t)
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		w.Header().Set("Connection", "close")
+		w.Header().Set("Trailer", "Server-Trailer-A, Server-Trailer-B")
+		w.Header().Add("Trailer", "Server-Trailer-C")
+
+		var decl []string
+		for k := range r.Trailer {
+			decl = append(decl, k)
+		}
+		sort.Strings(decl)
+
+		slurp, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("Server reading request body: %v", err)
+		}
+		if string(slurp) != "foo" {
+			t.Errorf("Server read request body %q; want foo", slurp)
+		}
+		if r.Trailer == nil {
+			io.WriteString(w, "nil Trailer")
+		} else {
+			fmt.Fprintf(w, "decl: %v, vals: %s, %s",
+				decl,
+				r.Trailer.Get("Client-Trailer-A"),
+				r.Trailer.Get("Client-Trailer-B"))
+		}
+
+		// TODO: golang.org/issue/7759: there's no way yet for
+		// the server to set trailers without hijacking, so do
+		// that for now, just to test the client.  Later, in
+		// Go 1.4, it should be implicit that any mutations
+		// to w.Header() after the initial write are the
+		// trailers to be sent, if and only if they were
+		// previously declared with w.Header().Set("Trailer",
+		// ..keys..)
+		w.(Flusher).Flush()
+		conn, buf, _ := w.(Hijacker).Hijack()
+		t := Header{}
+		t.Set("Server-Trailer-A", "valuea")
+		t.Set("Server-Trailer-C", "valuec") // skipping B
+		buf.WriteString("0\r\n")            // eof
+		t.Write(buf)
+		buf.WriteString("\r\n") // end of trailers
+		buf.Flush()
+		conn.Close()
+	}))
+	defer ts.Close()
+
+	var req *Request
+	req, _ = NewRequest("POST", ts.URL, io.MultiReader(
+		eofReaderFunc(func() {
+			req.Trailer["Client-Trailer-A"] = []string{"valuea"}
+		}),
+		strings.NewReader("foo"),
+		eofReaderFunc(func() {
+			req.Trailer["Client-Trailer-B"] = []string{"valueb"}
+		}),
+	))
+	req.Trailer = Header{
+		"Client-Trailer-A": nil, //  to be set later
+		"Client-Trailer-B": nil, //  to be set later
+	}
+	req.ContentLength = -1
+	res, err := DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wantBody(res, err, "decl: [Client-Trailer-A Client-Trailer-B], vals: valuea, valueb"); err != nil {
+		t.Error(err)
+	}
+	want := Header{
+		"Server-Trailer-A": []string{"valuea"},
+		"Server-Trailer-B": nil,
+		"Server-Trailer-C": []string{"valuec"},
+	}
+	if !reflect.DeepEqual(res.Trailer, want) {
+		t.Errorf("Response trailers = %#v; want %#v", res.Trailer, want)
 	}
 }

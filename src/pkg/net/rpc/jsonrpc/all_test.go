@@ -5,12 +5,15 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/rpc"
+	"strings"
 	"testing"
 )
 
@@ -183,6 +186,55 @@ func TestMalformedInput(t *testing.T) {
 	cli, srv := net.Pipe()
 	go cli.Write([]byte(`{id:1}`)) // invalid json
 	ServeConn(srv)                 // must return, not loop
+}
+
+func TestMalformedOutput(t *testing.T) {
+	cli, srv := net.Pipe()
+	go srv.Write([]byte(`{"id":0,"result":null,"error":null}`))
+	go ioutil.ReadAll(srv)
+
+	client := NewClient(cli)
+	defer client.Close()
+
+	args := &Args{7, 8}
+	reply := new(Reply)
+	err := client.Call("Arith.Add", args, reply)
+	if err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestServerErrorHasNullResult(t *testing.T) {
+	var out bytes.Buffer
+	sc := NewServerCodec(struct {
+		io.Reader
+		io.Writer
+		io.Closer
+	}{
+		Reader: strings.NewReader(`{"method": "Arith.Add", "id": "123", "params": []}`),
+		Writer: &out,
+		Closer: ioutil.NopCloser(nil),
+	})
+	r := new(rpc.Request)
+	if err := sc.ReadRequestHeader(r); err != nil {
+		t.Fatal(err)
+	}
+	const valueText = "the value we don't want to see"
+	const errorText = "some error"
+	err := sc.WriteResponse(&rpc.Response{
+		ServiceMethod: "Method",
+		Seq:           1,
+		Error:         errorText,
+	}, valueText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), errorText) {
+		t.Fatalf("Response didn't contain expected error %q: %s", errorText, &out)
+	}
+	if strings.Contains(out.String(), valueText) {
+		t.Errorf("Response contains both an error and value: %s", &out)
+	}
 }
 
 func TestUnexpectedError(t *testing.T) {

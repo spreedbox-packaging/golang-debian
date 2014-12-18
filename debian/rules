@@ -23,8 +23,8 @@ build-arch build-indep build clean install binary-arch binary-indep binary: debi
 override_dh_auto_clean:
 	rm -rf bin pkg
 	rm -f src/cmd/*/zdefaultcc.go src/cmd/gc/opnames.h src/liblink/anames?.c \
-          src/pkg/runtime/z*.s src/pkg/runtime/z*.h \
-		  src/pkg/runtime/z*.c src/pkg/runtime/z*.go
+          src/runtime/z*.s src/runtime/z*.h \
+		  src/runtime/z*.c src/runtime/z*.go
 	# golang-go-$os-$arch.install files are auto-generated in override_dh_install
 	rm -f debian/golang-go-*.install
 	# Ditto for golang-go-$os-$arch.lintian-overrides
@@ -78,7 +78,7 @@ override_dh_install:
 	done
 	dh_install --fail-missing
 	# Remove .syso files of the race detector; it is not used yet and the files are arch-dependent.
-	find $(CURDIR)/debian/golang-src/usr/share/go/src/pkg/runtime/race -type f -name '*.syso' -delete
+	find $(CURDIR)/debian/golang-src/usr/share/go/src/runtime/race -type f -name '*.syso' -delete
 	# Remove Plan9 rc(1) scripts
 	find $(CURDIR)/debian/golang-src/usr/share/go/src -type f -name "*.rc" -delete
 	# Remove empty /usr/share/go/src from golang-go, it is provided by golang-src

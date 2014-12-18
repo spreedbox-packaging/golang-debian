@@ -1,16 +1,16 @@
-Index: golang/src/pkg/runtime/os_linux.h
-===================================================================
---- golang.orig/src/pkg/runtime/os_linux.h	2014-09-16 13:51:35.000000000 +0200
-+++ golang/src/pkg/runtime/os_linux.h	2014-09-16 14:23:01.373547216 +0200
-@@ -16,7 +16,11 @@
- void runtime·setitimer(int32, Itimerval*, Itimerval*);
+diff --git a/src/runtime/os_linux.h b/src/runtime/os_linux.h
+index 75606d6..7e242cb 100644
+--- golang.orig/src/runtime/os_linux.h
++++ golang/src/runtime/os_linux.h
+@@ -16,7 +16,11 @@ void runtime·setitimer(int32, Itimerval*, Itimerval*);
  
- 
+ enum {
+ 	SS_DISABLE = 2,
 +#ifdef GOARCH_arm
-+#define	NSIG	64
++    NSIG = 64,
 +#else
- #define	NSIG	65
+ 	NSIG = 65,
 +#endif
- #define	SI_USER 0
- 
- // It's hard to tease out exactly how big a Sigset is, but
+ 	SI_USER = 0,
+ 	SIG_SETMASK = 2,
+ 	RLIMIT_AS = 9,

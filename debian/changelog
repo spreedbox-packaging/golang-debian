@@ -1,3 +1,18 @@
+golang (2:1.4-1+struktur0+wheezy0) precise; urgency=low
+
+  * Backport to debian/wheezy, no further changes.
+
+ -- Lance Cooper <lance@struktur.de>  Thu, 18 Dec 2014 15:56:31 -0600
+
+golang (2:1.4-1+struktur0) precise; urgency=low
+
+  * New major upstream version.
+  * Packaging for this release features the following changes:
+    - Remove vendor patches to archive/tar, in upstream now.
+    - Editor modes are no longer provided by upstream.
+
+ -- Lance Cooper <lance@struktur.de>  Thu, 18 Dec 2014 13:46:46 -0600
+
 golang (2:1.3.3-1+struktur0+wheezy0) wheezy; urgency=low
 
   * Backport to debian/wheezy, no further changes.

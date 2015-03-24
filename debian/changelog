@@ -1,4 +1,4 @@
-golang (2:1.4-1+struktur0+wheezy0) precise; urgency=low
+golang (2:1.4-1+struktur0+wheezy0) wheezy; urgency=low
 
   * Backport to debian/wheezy, no further changes.
 

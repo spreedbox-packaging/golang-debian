@@ -1,3 +1,9 @@
+golang (2:1.4.2-1+struktur0+wheezy0) wheezy; urgency=low
+
+  * Backport to debian/wheezy, no further changes.
+
+ -- Lance Cooper <lance@struktur.de>  Tue, 24 Mar 2015 19:23:45 -0500
+
 golang (2:1.4.2-1+struktur0) precise; urgency=low
 
   * New minor upstream release.

@@ -1,3 +1,9 @@
+golang (2:1.4.2-1+struktur0+trusty0) trusty; urgency=low
+
+  * Ported to ubuntu/trusty, no further changes. 
+
+ -- Simon Eisenmann <simon@struktur.de>  Wed, 01 Apr 2015 15:02:50 +0200
+
 golang (2:1.4.2-1+struktur0) precise; urgency=low
 
   * New minor upstream release.

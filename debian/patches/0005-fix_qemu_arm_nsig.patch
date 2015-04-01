@@ -1,0 +1,16 @@
+diff --git a/src/runtime/os_linux.h b/src/runtime/os_linux.h
+index 75606d6..7e242cb 100644
+--- golang.orig/src/runtime/os_linux.h
++++ golang/src/runtime/os_linux.h
+@@ -16,7 +16,11 @@ void runtime·setitimer(int32, Itimerval*, Itimerval*);
+ 
+ enum {
+ 	SS_DISABLE = 2,
++#ifdef GOARCH_arm
++    NSIG = 64,
++#else
+ 	NSIG = 65,
++#endif
+ 	SI_USER = 0,
+ 	SIG_SETMASK = 2,
+ 	RLIMIT_AS = 9,

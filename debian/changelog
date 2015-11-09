@@ -1,8 +1,8 @@
-golang (2:1.4.2-2+struktur0) trusty; urgency=low
+golang (2:1.4.2-2+struktur0+trusty0) trusty; urgency=low
 
   * Patch ELF header for armhf per Ubuntu upstream.
 
- -- Lance Cooper <lance@struktur.de>  Thu, 28 May 2015 11:12:29 -0500
+ -- Joachim Bauch <bauch@struktur.de>  Mon, 09 Nov 2015 11:04:35 +0100
 
 golang (2:1.4.2-1+struktur0+trusty0) trusty; urgency=low
 

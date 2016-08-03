@@ -1,3 +1,10 @@
+golang (2:1.4.2-1+struktur1) precise; urgency=low
+
+  [ Lance Cooper ]
+  * Patch ELF header for armhf per Ubuntu upstream.
+
+ -- Joachim Bauch <bauch@struktur.de>  Wed, 03 Aug 2016 09:12:22 +0200
+
 golang (2:1.4.2-1+struktur0) precise; urgency=low
 
   * New minor upstream release.
